@@ -11,12 +11,13 @@ import java.net.URI;
 @SpringBootApplication
 public class Application {
     public static void main(String[] args) {
-        // We need to set java.awt.headless to false so that Desktop.getDesktop() can work
+        // We need to set java.awt.headless to false so that Desktop.getDesktop() can
+        // work
         System.setProperty("java.awt.headless", "false");
         SpringApplication.run(Application.class, args);
     }
 
-    @EventListener({ApplicationReadyEvent.class})
+    @EventListener({ ApplicationReadyEvent.class })
     public void applicationReadyEvent() {
         System.out.println("Application started ... launching browser");
         String url = "http://localhost:9009";
