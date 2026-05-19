@@ -40,3 +40,9 @@ Access the UI at: `http://localhost:3000`
 ## 🏗 Stack
 - **Backend**: Spring Boot 3, Java 17+, Maven, Actuator
 - **Frontend**: React, Vite, MUI, Framer Motion
+
+## 🏗 Example
+- **Screenshots**:
+![Project Screenshot](images/image1.png)
+![Project Screenshot](images/image2.png)
+![Project Screenshot](images/image3.png)
