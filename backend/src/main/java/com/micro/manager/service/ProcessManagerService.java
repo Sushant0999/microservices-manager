@@ -1,6 +1,7 @@
 package com.micro.manager.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.micro.manager.model.Project;
 import com.micro.manager.model.ServiceConfig;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
@@ -16,14 +17,16 @@ import java.util.function.Consumer;
 @Service
 public class ProcessManagerService {
 
+    private final Map<String, Project> projects = new ConcurrentHashMap<>();
     private final Map<String, Process> activeProcesses = new ConcurrentHashMap<>();
     private final Map<String, List<String>> logs = new ConcurrentHashMap<>();
     private final Map<String, List<Consumer<String>>> logConsumers = new ConcurrentHashMap<>();
-    private final Map<String, ServiceConfig> serviceConfigs = new ConcurrentHashMap<>();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     
     @org.springframework.beans.factory.annotation.Value("${server.port:9009}")
     private int serverPort;
+    
+    private File configFile;
 
     @PostConstruct
     public void init() throws IOException {
@@ -33,60 +36,207 @@ public class ProcessManagerService {
     @jakarta.annotation.PreDestroy
     public void shutdown() {
         System.out.println("Shutting down manager, stopping all services...");
-        for (String name : new HashSet<>(activeProcesses.keySet())) {
-            stopService(name);
-        }
-    }
-
-    public void loadConfigs() throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
-        File configFile = new File("../services.json");
-        if (configFile.exists()) {
-            Map<String, List<ServiceConfig>> data = mapper.readValue(configFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, List<ServiceConfig>>>() {});
-            if (data != null && data.get("services") != null) {
-                List<ServiceConfig> list = mapper.convertValue(data.get("services"), mapper.getTypeFactory().constructCollectionType(List.class, ServiceConfig.class));
-                list.forEach(s -> {
-                    s.setStatus("STOPPED");
-                    serviceConfigs.put(s.getName(), s);
-                });
+        for (String key : new HashSet<>(activeProcesses.keySet())) {
+            String[] parts = key.split(":", 2);
+            if (parts.length == 2) {
+                stopService(parts[0], parts[1]);
             }
         }
     }
 
-    private void saveConfigs() throws IOException {
+    private String getServiceKey(String projectName, String serviceName) {
+        return projectName + ":" + serviceName;
+    }
+
+    public void loadConfigs() throws IOException {
         ObjectMapper mapper = new ObjectMapper();
-        File configFile = new File("../services.json");
-        Map<String, Collection<ServiceConfig>> data = new HashMap<>();
-        data.put("services", serviceConfigs.values());
+        File parentConfig = new File("../services.json");
+        File localConfig = new File("services.json");
+        
+        if (parentConfig.exists()) {
+            configFile = parentConfig;
+        } else if (localConfig.exists()) {
+            configFile = localConfig;
+        } else {
+            configFile = parentConfig; // default fallback
+        }
+
+        if (!configFile.exists()) {
+            Project defaultProject = new Project();
+            defaultProject.setName("Default");
+            defaultProject.setDescription("Default Project");
+            projects.put("Default", defaultProject);
+            saveConfigs();
+            return;
+        }
+
+        try {
+            Map<String, Object> rawMap = mapper.readValue(configFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            if (rawMap.containsKey("projects")) {
+                List<Project> list = mapper.convertValue(rawMap.get("projects"), mapper.getTypeFactory().constructCollectionType(List.class, Project.class));
+                list.forEach(p -> {
+                    if (p.getServices() != null) {
+                        p.getServices().forEach(s -> {
+                            s.setStatus("STOPPED");
+                            s.setProjectName(p.getName());
+                        });
+                    } else {
+                        p.setServices(new ArrayList<>());
+                    }
+                    projects.put(p.getName(), p);
+                });
+            } else if (rawMap.containsKey("services")) {
+                List<ServiceConfig> list = mapper.convertValue(rawMap.get("services"), mapper.getTypeFactory().constructCollectionType(List.class, ServiceConfig.class));
+                Project defaultProject = new Project();
+                defaultProject.setName("Default");
+                defaultProject.setDescription("Default Project");
+                list.forEach(s -> {
+                    s.setStatus("STOPPED");
+                    s.setProjectName("Default");
+                    defaultProject.getServices().add(s);
+                });
+                projects.put("Default", defaultProject);
+                saveConfigs();
+            } else {
+                Project defaultProject = new Project();
+                defaultProject.setName("Default");
+                defaultProject.setDescription("Default Project");
+                projects.put("Default", defaultProject);
+                saveConfigs();
+            }
+        } catch (Exception e) {
+            System.err.println("Error reading configs: " + e.getMessage());
+            Project defaultProject = new Project();
+            defaultProject.setName("Default");
+            defaultProject.setDescription("Default Project");
+            projects.put("Default", defaultProject);
+            saveConfigs();
+        }
+    }
+
+    private synchronized void saveConfigs() throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        if (configFile == null) {
+            configFile = new File("../services.json");
+        }
+        Map<String, Collection<Project>> data = new HashMap<>();
+        data.put("projects", projects.values());
         mapper.writerWithDefaultPrettyPrinter().writeValue(configFile, data);
     }
 
-    public void addService(ServiceConfig config) throws IOException {
-        serviceConfigs.put(config.getName(), config);
-        saveConfigs();
+    public Collection<Project> getProjects() {
+        return projects.values();
     }
 
-    public void updateService(String oldName, ServiceConfig config) throws IOException {
-        if (!oldName.equals(config.getName())) {
-            serviceConfigs.remove(oldName);
+    public void addProject(Project project) throws IOException {
+        if (projects.containsKey(project.getName())) {
+            throw new IllegalArgumentException("Project already exists: " + project.getName());
         }
-        serviceConfigs.put(config.getName(), config);
+        if (project.getServices() == null) {
+            project.setServices(new ArrayList<>());
+        }
+        projects.put(project.getName(), project);
         saveConfigs();
     }
 
-    public void removeService(String name) throws IOException {
-        stopService(name);
-        serviceConfigs.remove(name);
+    public void updateProject(String oldName, Project project) throws IOException {
+        if (!oldName.equals(project.getName()) && projects.containsKey(project.getName())) {
+            throw new IllegalArgumentException("Project name already exists: " + project.getName());
+        }
+        
+        Project existing = projects.remove(oldName);
+        if (existing != null) {
+            List<ServiceConfig> updatedServices = project.getServices();
+            if (updatedServices != null) {
+                for (ServiceConfig updated : updatedServices) {
+                    ServiceConfig oldService = existing.getServices().stream()
+                        .filter(s -> s.getName().equals(updated.getName()))
+                        .findFirst().orElse(null);
+                    if (oldService != null) {
+                        updated.setStatus(oldService.getStatus());
+                    } else {
+                        updated.setStatus("STOPPED");
+                    }
+                    updated.setProjectName(project.getName());
+                }
+                existing.setServices(updatedServices);
+            }
+            existing.setName(project.getName());
+            existing.setDescription(project.getDescription());
+            projects.put(project.getName(), existing);
+        } else {
+            if (project.getServices() == null) project.setServices(new ArrayList<>());
+            projects.put(project.getName(), project);
+        }
         saveConfigs();
     }
 
-    public Collection<ServiceConfig> getServices() {
-        return serviceConfigs.values();
+    public void removeProject(String projectName) throws IOException {
+        Project project = projects.remove(projectName);
+        if (project != null && project.getServices() != null) {
+            for (ServiceConfig s : project.getServices()) {
+                stopService(projectName, s.getName());
+            }
+        }
+        saveConfigs();
     }
 
-    public void startService(String name) throws IOException {
-        ServiceConfig config = serviceConfigs.get(name);
-        if (config == null || activeProcesses.containsKey(name)) return;
+    public void addService(String projectName, ServiceConfig config) throws IOException {
+        Project project = projects.get(projectName);
+        if (project == null) {
+            throw new IllegalArgumentException("Project not found: " + projectName);
+        }
+        boolean exists = project.getServices().stream().anyMatch(s -> s.getName().equals(config.getName()));
+        if (exists) {
+            throw new IllegalArgumentException("Service already exists in project " + projectName + ": " + config.getName());
+        }
+        config.setStatus("STOPPED");
+        config.setProjectName(projectName);
+        project.getServices().add(config);
+        saveConfigs();
+    }
+
+    public void updateService(String projectName, String oldServiceName, ServiceConfig config) throws IOException {
+        Project project = projects.get(projectName);
+        if (project == null) {
+            throw new IllegalArgumentException("Project not found: " + projectName);
+        }
+        
+        if (!oldServiceName.equals(config.getName())) {
+            stopService(projectName, oldServiceName);
+        }
+
+        List<ServiceConfig> services = project.getServices();
+        for (int i = 0; i < services.size(); i++) {
+            if (services.get(i).getName().equals(oldServiceName)) {
+                String oldStatus = services.get(i).getStatus();
+                config.setStatus(oldStatus);
+                config.setProjectName(projectName);
+                services.set(i, config);
+                break;
+            }
+        }
+        saveConfigs();
+    }
+
+    public void removeService(String projectName, String serviceName) throws IOException {
+        stopService(projectName, serviceName);
+        Project project = projects.get(projectName);
+        if (project != null) {
+            project.getServices().removeIf(s -> s.getName().equals(serviceName));
+        }
+        saveConfigs();
+    }
+
+    public void startService(String projectName, String name) throws IOException {
+        Project project = projects.get(projectName);
+        if (project == null) return;
+        ServiceConfig config = project.getServices().stream()
+            .filter(s -> s.getName().equals(name))
+            .findFirst().orElse(null);
+        
+        String key = getServiceKey(projectName, name);
+        if (config == null || activeProcesses.containsKey(key)) return;
 
         String os = System.getProperty("os.name").toLowerCase();
         ProcessBuilder pb;
@@ -103,28 +253,27 @@ public class ProcessManagerService {
         pb.directory(new File(config.getPath()));
         pb.redirectErrorStream(true);
         
-        // Ensure port is free before starting
         killProcessByPort(config.getPort());
         
         Process process = pb.start();
 
-        activeProcesses.put(name, process);
+        activeProcesses.put(key, process);
         config.setStatus("RUNNING");
 
-        executorService.submit(() -> captureLogs(name, process));
+        executorService.submit(() -> captureLogs(projectName, name, process));
     }
 
-    private void captureLogs(String name, Process process) {
+    private void captureLogs(String projectName, String name, Process process) {
+        String key = getServiceKey(projectName, name);
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 final String finalLine = line;
-                logs.computeIfAbsent(name, k -> Collections.synchronizedList(new ArrayList<>())).add(finalLine);
-                // Keep only last 1000 lines
-                if (logs.get(name).size() > 1000) {
-                    logs.get(name).remove(0);
+                logs.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>())).add(finalLine);
+                if (logs.get(key).size() > 1000) {
+                    logs.get(key).remove(0);
                 }
-                List<Consumer<String>> consumers = logConsumers.get(name);
+                List<Consumer<String>> consumers = logConsumers.get(key);
                 if (consumers != null) {
                     for (Consumer<String> consumer : consumers) {
                         try {
@@ -138,27 +287,37 @@ public class ProcessManagerService {
         } catch (IOException e) {
             e.printStackTrace();
         } finally {
-            activeProcesses.remove(name);
-            ServiceConfig config = serviceConfigs.get(name);
-            if (config != null) {
-                config.setStatus("STOPPED");
-                killProcessByPort(config.getPort());
+            activeProcesses.remove(key);
+            Project project = projects.get(projectName);
+            if (project != null) {
+                ServiceConfig config = project.getServices().stream()
+                    .filter(s -> s.getName().equals(name))
+                    .findFirst().orElse(null);
+                if (config != null) {
+                    config.setStatus("STOPPED");
+                    killProcessByPort(config.getPort());
+                }
             }
         }
     }
 
-    public void stopService(String name) {
-        Process process = activeProcesses.remove(name);
+    public void stopService(String projectName, String name) {
+        String key = getServiceKey(projectName, name);
+        Process process = activeProcesses.remove(key);
         if (process != null) {
             process.destroy();
-            // Try to destroy the whole process tree if possible
             process.destroyForcibly();
         }
         
-        ServiceConfig config = serviceConfigs.get(name);
-        if (config != null) {
-            config.setStatus("STOPPED");
-            killProcessByPort(config.getPort());
+        Project project = projects.get(projectName);
+        if (project != null) {
+            ServiceConfig config = project.getServices().stream()
+                .filter(s -> s.getName().equals(name))
+                .findFirst().orElse(null);
+            if (config != null) {
+                config.setStatus("STOPPED");
+                killProcessByPort(config.getPort());
+            }
         }
     }
 
@@ -167,23 +326,20 @@ public class ProcessManagerService {
         String os = System.getProperty("os.name").toLowerCase();
         try {
             if (os.contains("win")) {
-                // More robust port-to-PID lookup on Windows
                 ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "netstat -ano | findstr LISTENING | findstr :" + port);
                 Process p = pb.start();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                     String line;
                     Set<String> pids = new HashSet<>();
                     while ((line = reader.readLine()) != null) {
-                        // Line example: TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       1234
                         String trimmed = line.trim();
                         if (trimmed.isEmpty()) continue;
                         
                         String[] parts = trimmed.split("\\s+");
                         if (parts.length >= 5) {
-                            String localAddr = parts[1]; // e.g. 0.0.0.0:8080
+                            String localAddr = parts[1];
                             String pid = parts[parts.length - 1];
                             
-                            // Ensure we match the exact port, not just a substring
                             if (localAddr.endsWith(":" + port) && pid.matches("\\d+")) {
                                 pids.add(pid);
                             }
@@ -193,13 +349,11 @@ public class ProcessManagerService {
                     if (!pids.isEmpty()) {
                         System.out.println("Killing processes on port " + port + ": " + pids);
                         for (String pid : pids) {
-                            // Kill process and all its children (/T) forcibly (/F)
                             new ProcessBuilder("taskkill", "/F", "/PID", pid, "/T").start().waitFor();
                         }
                     }
                 }
             } else {
-                // Linux/Mac: fuser -k PORT/tcp or lsof
                 new ProcessBuilder("sh", "-c", "lsof -ti tcp:" + port + " | xargs kill -9").start().waitFor();
             }
         } catch (Exception e) {
@@ -207,13 +361,15 @@ public class ProcessManagerService {
         }
     }
 
-    public List<String> getLogs(String name) {
-        return logs.getOrDefault(name, Collections.emptyList());
+    public List<String> getLogs(String projectName, String name) {
+        String key = getServiceKey(projectName, name);
+        return logs.getOrDefault(key, Collections.emptyList());
     }
 
-    public void addLogConsumer(String name, Consumer<String> consumer) {
-        logConsumers.computeIfAbsent(name, k -> new CopyOnWriteArrayList<>()).add(consumer);
-        List<String> existingLogs = getLogs(name);
+    public void addLogConsumer(String projectName, String name, Consumer<String> consumer) {
+        String key = getServiceKey(projectName, name);
+        logConsumers.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(consumer);
+        List<String> existingLogs = getLogs(projectName, name);
         String[] copy;
         synchronized(existingLogs) {
             copy = existingLogs.toArray(new String[0]);
@@ -225,18 +381,24 @@ public class ProcessManagerService {
         }
     }
 
-    public void removeLogConsumer(String name, Consumer<String> consumer) {
-        List<Consumer<String>> consumers = logConsumers.get(name);
+    public void removeLogConsumer(String projectName, String name, Consumer<String> consumer) {
+        String key = getServiceKey(projectName, name);
+        List<Consumer<String>> consumers = logConsumers.get(key);
         if (consumers != null) {
             consumers.remove(consumer);
         }
     }
 
-    public void rebuildService(String name) throws IOException, InterruptedException {
-        ServiceConfig config = serviceConfigs.get(name);
+    public void rebuildService(String projectName, String name) throws IOException, InterruptedException {
+        Project project = projects.get(projectName);
+        if (project == null) return;
+        ServiceConfig config = project.getServices().stream()
+            .filter(s -> s.getName().equals(name))
+            .findFirst().orElse(null);
+            
         if (config == null || config.getRebuildCommand() == null || config.getRebuildCommand().isEmpty()) return;
 
-        stopService(name);
+        stopService(projectName, name);
         config.setStatus("REBUILDING");
 
         String os = System.getProperty("os.name").toLowerCase();
@@ -255,8 +417,9 @@ public class ProcessManagerService {
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
-        activeProcesses.put(name, process);
-        logs.put(name, Collections.synchronizedList(new ArrayList<>()));
-        executorService.submit(() -> captureLogs(name, process));
+        String key = getServiceKey(projectName, name);
+        activeProcesses.put(key, process);
+        logs.put(key, Collections.synchronizedList(new ArrayList<>()));
+        executorService.submit(() -> captureLogs(projectName, name, process));
     }
 }

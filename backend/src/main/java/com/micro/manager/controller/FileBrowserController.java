@@ -104,13 +104,47 @@ public class FileBrowserController {
             if (appFile.exists()) {
                 try {
                     List<String> lines = java.nio.file.Files.readAllLines(appFile.toPath());
+                    boolean insideServerBlock = false;
+                    int serverIndent = -1;
+
                     for (String line : lines) {
                         String trimmed = line.trim();
-                        // Support both application.properties and application.yml syntax
+                        if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+
+                        // 1. Check flat syntax: server.port=8080 or server.port: 8080
                         if (trimmed.startsWith("server.port") && (trimmed.contains("=") || trimmed.contains(":"))) {
                             String[] parts = trimmed.split("[=:]", 2);
                             if (parts.length > 1) {
-                                return Integer.parseInt(parts[1].trim());
+                                try {
+                                    return Integer.parseInt(parts[1].trim());
+                                } catch (NumberFormatException e) {
+                                    // Ignore
+                                }
+                            }
+                        }
+
+                        // 2. Check hierarchical/nested YAML syntax
+                        int indent = 0;
+                        while (indent < line.length() && (line.charAt(indent) == ' ' || line.charAt(indent) == '\t')) {
+                            indent++;
+                        }
+
+                        if (trimmed.equals("server:") || trimmed.startsWith("server: ")) {
+                            insideServerBlock = true;
+                            serverIndent = indent;
+                        } else if (insideServerBlock) {
+                            if (indent <= serverIndent && !trimmed.isEmpty()) {
+                                insideServerBlock = false;
+                                serverIndent = -1;
+                            } else if (trimmed.startsWith("port") && (trimmed.contains(":") || trimmed.contains("="))) {
+                                String[] parts = trimmed.split("[=:]", 2);
+                                if (parts.length > 1) {
+                                    try {
+                                        return Integer.parseInt(parts[1].trim());
+                                    } catch (NumberFormatException e) {
+                                        // Ignore
+                                    }
+                                }
                             }
                         }
                     }
