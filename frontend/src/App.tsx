@@ -13,7 +13,8 @@ import {
   Add as AddIcon, Delete as DeleteIcon, FolderOpen as BrowseIcon, 
   Edit as EditIcon, ArrowUpward as UpIcon,
   Launch as LaunchIcon, GridView as GridIcon, List as ListIcon,
-  Folder as ProjectIcon, Settings as SettingsIcon, Info as InfoIcon
+  Folder as ProjectIcon,
+  ChevronLeft as CollapseIcon, ChevronRight as ExpandIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -145,6 +146,9 @@ function App() {
   const [currentPath, setCurrentPath] = useState('');
   const [dirs, setDirs] = useState<string[]>([]);
   
+  // Sidebar visibility
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+
   // Display view mode state
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [suggestedCommands, setSuggestedCommands] = useState<string[]>([]);
@@ -380,6 +384,22 @@ function App() {
                 <Typography component="span" variant="h4" sx={{ color: 'rgba(255,255,255,0.7)', fontWeight: 300 }}>Manager</Typography>
               </Typography>
               <Stack direction="row" spacing={2} alignItems="center">
+                <Tooltip title={sidebarVisible ? 'Hide Projects Panel' : 'Show Projects Panel'}>
+                  <IconButton
+                    onClick={() => setSidebarVisible(v => !v)}
+                    size="small"
+                    sx={{
+                      color: sidebarVisible ? 'primary.light' : 'rgba(255,255,255,0.5)',
+                      background: sidebarVisible ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.05)',
+                      border: '1px solid',
+                      borderColor: sidebarVisible ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.1)',
+                      borderRadius: 2,
+                      '&:hover': { background: 'rgba(99,102,241,0.25)' }
+                    }}
+                  >
+                    {sidebarVisible ? <CollapseIcon /> : <ExpandIcon />}
+                  </IconButton>
+                </Tooltip>
                 <ToggleButtonGroup
                   value={viewMode}
                   exclusive
@@ -401,7 +421,9 @@ function App() {
           </Grid>
 
           {/* Left Sidebar - Projects list */}
-          <Grid item xs={12} md={3.5} lg={3}>
+          <AnimatePresence initial={false}>
+          {sidebarVisible && (
+          <Grid item xs={12} md={3.5} lg={3} component={motion.div} key="sidebar" initial={{ opacity: 0, x: -30, width: 0 }} animate={{ opacity: 1, x: 0, width: 'auto' }} exit={{ opacity: 0, x: -30 }} transition={{ duration: 0.25 }}>
             <Paper sx={{ 
               background: 'rgba(30, 41, 59, 0.4)', 
               backdropFilter: 'blur(12px)',
@@ -527,9 +549,11 @@ function App() {
               </List>
             </Paper>
           </Grid>
+          )}
+          </AnimatePresence>
 
           {/* Right Main Content Panel */}
-          <Grid item xs={12} md={8.5} lg={9}>
+          <Grid item xs={12} md={sidebarVisible ? 8.5 : 12} lg={sidebarVisible ? 9 : 12}>
             <Stack spacing={3}>
               {/* Active Project Dashboard Header & Stats */}
               <Paper sx={{ 
