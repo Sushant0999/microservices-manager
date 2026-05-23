@@ -30,7 +30,52 @@ public class ProcessManagerService {
 
     @PostConstruct
     public void init() throws IOException {
+        rotateLogFiles();
         loadConfigs();
+    }
+
+    private void rotateLogFiles() {
+        try {
+            File rootDir;
+            File backendDir;
+            File parentConfig = new File("../services.json");
+            if (parentConfig.exists()) {
+                rootDir = new File("..");
+                backendDir = new File(".");
+            } else {
+                rootDir = new File(".");
+                backendDir = new File("backend");
+            }
+
+            List<File> logFiles = new ArrayList<>();
+            File[] rootFiles = rootDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".log"));
+            if (rootFiles != null) {
+                logFiles.addAll(Arrays.asList(rootFiles));
+            }
+            if (backendDir.exists() && backendDir.isDirectory()) {
+                File[] backendFiles = backendDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".log"));
+                if (backendFiles != null) {
+                    for (File f : backendFiles) {
+                        if (!logFiles.contains(f)) {
+                            logFiles.add(f);
+                        }
+                    }
+                }
+            }
+
+            // Sort files by last modified time in descending order (newest first)
+            logFiles.sort((f1, f2) -> Long.compare(f2.lastModified(), f1.lastModified()));
+
+            System.out.println("Found " + logFiles.size() + " log files for rotation.");
+            // Keep the first 5 log files, delete the rest
+            for (int i = 5; i < logFiles.size(); i++) {
+                File toDelete = logFiles.get(i);
+                boolean deleted = toDelete.delete();
+                System.out.println("Deleting old log file: " + toDelete.getName() + " - Success: " + deleted);
+            }
+        } catch (Exception e) {
+            System.err.println("Error rotating log files: " + e.getMessage());
+        }
     }
 
     @jakarta.annotation.PreDestroy
@@ -269,17 +314,20 @@ public class ProcessManagerService {
             String line;
             while ((line = reader.readLine()) != null) {
                 final String finalLine = line;
-                logs.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>())).add(finalLine);
-                if (logs.get(key).size() > 1000) {
-                    logs.get(key).remove(0);
-                }
-                List<Consumer<String>> consumers = logConsumers.get(key);
-                if (consumers != null) {
-                    for (Consumer<String> consumer : consumers) {
-                        try {
-                            consumer.accept(finalLine);
-                        } catch (Exception e) {
-                            // ignore
+                List<String> serviceLogs = logs.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()));
+                synchronized (serviceLogs) {
+                    serviceLogs.add(finalLine);
+                    if (serviceLogs.size() > 1000) {
+                        serviceLogs.remove(0);
+                    }
+                    List<Consumer<String>> consumers = logConsumers.get(key);
+                    if (consumers != null) {
+                        for (Consumer<String> consumer : consumers) {
+                            try {
+                                consumer.accept(finalLine);
+                            } catch (Exception e) {
+                                // ignore
+                            }
                         }
                     }
                 }
@@ -368,16 +416,16 @@ public class ProcessManagerService {
 
     public void addLogConsumer(String projectName, String name, Consumer<String> consumer) {
         String key = getServiceKey(projectName, name);
-        logConsumers.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(consumer);
-        List<String> existingLogs = getLogs(projectName, name);
-        String[] copy;
-        synchronized(existingLogs) {
-            copy = existingLogs.toArray(new String[0]);
-        }
-        for (String log : copy) {
-            try {
-                consumer.accept(log);
-            } catch (Exception e) {}
+        List<String> serviceLogs = logs.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()));
+        synchronized (serviceLogs) {
+            for (String log : serviceLogs) {
+                try {
+                    consumer.accept(log);
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+            logConsumers.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(consumer);
         }
     }
 

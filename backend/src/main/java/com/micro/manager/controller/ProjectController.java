@@ -82,12 +82,11 @@ public class ProjectController {
         
         Consumer<String> consumer = new Consumer<String>() {
             @Override
-            public void accept(String line) {
+            public synchronized void accept(String line) {
                 try {
                     emitter.send(line);
                 } catch (IOException e) {
                     processManager.removeLogConsumer(projectName, name, this);
-                    throw new RuntimeException(e);
                 }
             }
         };

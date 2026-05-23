@@ -49,12 +49,15 @@ const LogCard = memo(({ service, onAction }: { service: Service, onAction: (proj
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (service.status !== 'RUNNING' && service.status !== 'REBUILDING') {
+      return;
+    }
     const eventSource = new EventSource(`/api/projects/${service.projectName}/services/${service.name}/logs`);
     eventSource.onmessage = (event) => {
       setLogs(prev => [...prev.slice(-99), event.data]);
     };
     return () => eventSource.close();
-  }, [service.projectName, service.name]);
+  }, [service.projectName, service.name, service.status]);
 
   useEffect(() => {
     if (scrollRef.current) {

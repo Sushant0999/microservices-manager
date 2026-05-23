@@ -25,3 +25,5 @@ target/
 
 # Project specific
 services.json
+backend/src/main/resources/static/*
+backend/target/*
