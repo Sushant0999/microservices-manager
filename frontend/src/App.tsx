@@ -154,6 +154,7 @@ function App() {
 
   // Display view mode state
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
+  const [detectedFramework, setDetectedFramework] = useState<string>('');
   const [suggestedCommands, setSuggestedCommands] = useState<string[]>([]);
   const [suggestedRebuildCommands, setSuggestedRebuildCommands] = useState<string[]>([]);
   
@@ -294,6 +295,7 @@ function App() {
     setEditingService(null);
     setSuggestedCommands([]);
     setSuggestedRebuildCommands([]);
+    setDetectedFramework('');
   };
 
   const startEditService = (service: Service) => {
@@ -327,16 +329,19 @@ function App() {
 
   const fetchSuggestions = async (path: string) => {
     try {
-      const { data } = await axios.get(`/api/fs/suggest-commands?path=${encodeURIComponent(path)}`);
+      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }] = await Promise.all([
+        axios.get(`/api/fs/suggest-commands?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/suggest-rebuild-commands?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/suggest-port?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/detect-framework?path=${encodeURIComponent(path)}`),
+      ]);
+
       setSuggestedCommands(data || []);
-      
-      const { data: rebuildData } = await axios.get(`/api/fs/suggest-rebuild-commands?path=${encodeURIComponent(path)}`);
       setSuggestedRebuildCommands(rebuildData || []);
+      setDetectedFramework(framework || '');
 
-      const { data: portData } = await axios.get(`/api/fs/suggest-port?path=${encodeURIComponent(path)}`);
-
-      setFormData(prev => ({ 
-        ...prev, 
+      setFormData(prev => ({
+        ...prev,
         startCommand: prev.startCommand || (data?.[0] || ''),
         rebuildCommand: prev.rebuildCommand || (rebuildData?.[0] || ''),
         port: portData ? portData : prev.port
@@ -964,6 +969,44 @@ function App() {
                   <BrowseIcon />
                 </Button>
               </Box>
+              {detectedFramework && detectedFramework !== 'unknown' && (() => {
+                const badges: Record<string, { label: string; color: string; bg: string }> = {
+                  'spring-boot':        { label: '🍃 Spring Boot',       color: '#6dbf82', bg: 'rgba(109,191,130,0.15)' },
+                  'gradle':             { label: '🐘 Gradle',            color: '#a0c4e0', bg: 'rgba(160,196,224,0.15)' },
+                  'angular':            { label: '🔺 Angular',           color: '#e6003f', bg: 'rgba(230,0,63,0.15)'   },
+                  'react-vite':         { label: '⚛️ React + Vite',      color: '#61dafb', bg: 'rgba(97,218,251,0.12)' },
+                  'react':              { label: '⚛️ React',             color: '#61dafb', bg: 'rgba(97,218,251,0.12)' },
+                  'vite':               { label: '⚡ Vite',              color: '#a78bfa', bg: 'rgba(167,139,250,0.15)' },
+                  'node':               { label: '🟢 Node.js',           color: '#68d391', bg: 'rgba(104,211,145,0.15)' },
+                  'python-venv-fastapi':{ label: '🐍 Python + venv (FastAPI)', color: '#fbbf24', bg: 'rgba(251,191,36,0.12)' },
+                  'python-venv-flask':  { label: '🐍 Python + venv (Flask)',   color: '#fbbf24', bg: 'rgba(251,191,36,0.12)' },
+                  'python-venv':        { label: '🐍 Python + venv',     color: '#fbbf24', bg: 'rgba(251,191,36,0.12)' },
+                  'python-fastapi':     { label: '🐍 Python (FastAPI)',   color: '#86efac', bg: 'rgba(134,239,172,0.12)' },
+                  'python-flask':       { label: '🐍 Python (Flask)',     color: '#86efac', bg: 'rgba(134,239,172,0.12)' },
+                  'python':             { label: '🐍 Python',            color: '#86efac', bg: 'rgba(134,239,172,0.12)' },
+                };
+                const badge = badges[detectedFramework];
+                if (!badge) return null;
+                return (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Chip
+                      label={badge.label}
+                      size="small"
+                      sx={{
+                        background: badge.bg,
+                        color: badge.color,
+                        fontWeight: 700,
+                        fontSize: '0.75rem',
+                        border: `1px solid ${badge.color}44`,
+                        letterSpacing: 0.3,
+                      }}
+                    />
+                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.7rem' }}>
+                      Detected framework
+                    </Typography>
+                  </Box>
+                );
+              })()}
               <TextField 
                 label="Port" 
                 fullWidth 

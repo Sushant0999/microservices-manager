@@ -299,8 +299,10 @@ public class ProcessManagerService {
         pb.redirectErrorStream(true);
         
         killProcessByPort(config.getPort());
+        waitForPortFree(config.getPort());
         
         Process process = pb.start();
+
 
         activeProcesses.put(key, process);
         config.setStatus("RUNNING");
@@ -369,43 +371,124 @@ public class ProcessManagerService {
         }
     }
 
+    /**
+     * Kills all processes listening on the given port.
+     * Retries up to MAX_KILL_RETRIES times, waiting KILL_RETRY_DELAY_MS between
+     * attempts, to handle cases where the OS needs a moment to release the port.
+     */
+    private static final int MAX_KILL_RETRIES   = 3;
+    private static final int KILL_RETRY_DELAY_MS = 400;
+
     private void killProcessByPort(int port) {
         if (port <= 0 || port == serverPort) return;
         String os = System.getProperty("os.name").toLowerCase();
-        try {
-            if (os.contains("win")) {
-                ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", "netstat -ano | findstr LISTENING | findstr :" + port);
-                Process p = pb.start();
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                    String line;
+
+        for (int attempt = 1; attempt <= MAX_KILL_RETRIES; attempt++) {
+            try {
+                boolean killed = false;
+                if (os.contains("win")) {
+                    // Use PowerShell to grab PIDs — handles 0.0.0.0, 127.0.0.1, ::1 bindings
+                    String psCmd = "(Get-NetTCPConnection -LocalPort " + port
+                            + " -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique";
+                    ProcessBuilder pb = new ProcessBuilder("powershell.exe", "-NoProfile", "-Command", psCmd);
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
                     Set<String> pids = new HashSet<>();
-                    while ((line = reader.readLine()) != null) {
-                        String trimmed = line.trim();
-                        if (trimmed.isEmpty()) continue;
-                        
-                        String[] parts = trimmed.split("\\s+");
-                        if (parts.length >= 5) {
-                            String localAddr = parts[1];
-                            String pid = parts[parts.length - 1];
-                            
-                            if (localAddr.endsWith(":" + port) && pid.matches("\\d+")) {
-                                pids.add(pid);
-                            }
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            String trimmed = line.trim();
+                            if (trimmed.matches("\\d+")) pids.add(trimmed);
                         }
                     }
-                    
+                    p.waitFor();
+
                     if (!pids.isEmpty()) {
-                        System.out.println("Killing processes on port " + port + ": " + pids);
+                        System.out.println("[KillPort] Attempt " + attempt + ": killing PIDs " + pids + " on port " + port);
                         for (String pid : pids) {
                             new ProcessBuilder("taskkill", "/F", "/PID", pid, "/T").start().waitFor();
                         }
+                        killed = true;
+                    }
+                } else {
+                    // Unix: lsof may return multiple PIDs
+                    ProcessBuilder pb = new ProcessBuilder("sh", "-c", "lsof -ti tcp:" + port);
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    Set<String> pids = new HashSet<>();
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            String trimmed = line.trim();
+                            if (trimmed.matches("\\d+")) pids.add(trimmed);
+                        }
+                    }
+                    p.waitFor();
+
+                    if (!pids.isEmpty()) {
+                        System.out.println("[KillPort] Attempt " + attempt + ": killing PIDs " + pids + " on port " + port);
+                        new ProcessBuilder("sh", "-c", "kill -9 " + String.join(" ", pids)).start().waitFor();
+                        killed = true;
                     }
                 }
-            } else {
-                new ProcessBuilder("sh", "-c", "lsof -ti tcp:" + port + " | xargs kill -9").start().waitFor();
+
+                if (!killed) {
+                    System.out.println("[KillPort] Port " + port + " is free (no process found on attempt " + attempt + ")");
+                    return; // nothing to kill
+                }
+
+                // Give the OS a moment to release the port before the next check/attempt
+                Thread.sleep(KILL_RETRY_DELAY_MS);
+
+                // If port is already free, stop retrying
+                if (isPortFree(port)) {
+                    System.out.println("[KillPort] Port " + port + " confirmed free after attempt " + attempt);
+                    return;
+                }
+
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                System.err.println("[KillPort] Error on attempt " + attempt + " for port " + port + ": " + e.getMessage());
             }
+        }
+        System.err.println("[KillPort] Could not fully free port " + port + " after " + MAX_KILL_RETRIES + " attempts");
+    }
+
+    /**
+     * Blocks until the port is free (confirmed via ServerSocket) or the timeout
+     * elapses (max 3 s). Called after killProcessByPort before launching the process.
+     */
+    private void waitForPortFree(int port) {
+        if (port <= 0 || port == serverPort) return;
+        int maxWaitMs  = 3000;
+        int pollMs     = 250;
+        int elapsed    = 0;
+        while (elapsed < maxWaitMs) {
+            if (isPortFree(port)) {
+                System.out.println("[KillPort] Port " + port + " is free, proceeding to start.");
+                return;
+            }
+            try {
+                Thread.sleep(pollMs);
+                elapsed += pollMs;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        System.err.println("[KillPort] Port " + port + " still not free after " + maxWaitMs + " ms — starting anyway.");
+    }
+
+    /** Returns true if a ServerSocket can bind to the given port (i.e., nothing is listening). */
+    private boolean isPortFree(int port) {
+        try (java.net.ServerSocket ss = new java.net.ServerSocket()) {
+            ss.setReuseAddress(true);
+            ss.bind(new java.net.InetSocketAddress(port));
+            return true;
         } catch (Exception e) {
-            System.err.println("Failed to kill process on port " + port + ": " + e.getMessage());
+            return false;
         }
     }
 
