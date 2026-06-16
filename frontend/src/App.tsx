@@ -52,11 +52,28 @@ const LogCard = memo(({ service, onAction }: { service: Service, onAction: (proj
     if (service.status !== 'RUNNING' && service.status !== 'REBUILDING') {
       return;
     }
-    const eventSource = new EventSource(`/api/projects/${service.projectName}/services/${service.name}/logs`);
-    eventSource.onmessage = (event) => {
-      setLogs(prev => [...prev.slice(-99), event.data]);
+    let active = true;
+    let es: EventSource;
+    let retryTimer: number;
+
+    const connect = () => {
+      if (!active) return;
+      es = new EventSource(`/api/projects/${service.projectName}/services/${service.name}/logs`);
+      es.onmessage = (event) => {
+        if (active) setLogs(prev => [...prev.slice(-99), event.data]);
+      };
+      es.onerror = () => {
+        es.close();
+        if (active) retryTimer = window.setTimeout(connect, 2000);
+      };
     };
-    return () => eventSource.close();
+
+    connect();
+    return () => {
+      active = false;
+      clearTimeout(retryTimer);
+      if (es) es.close();
+    };
   }, [service.projectName, service.name, service.status]);
 
   useEffect(() => {
@@ -192,6 +209,41 @@ function App() {
     }
   }, [logs]);
 
+  // SSE connection for the log modal — auto-reconnects on any drop
+  useEffect(() => {
+    if (!selectedLogService) return;
+
+    const { projectName, serviceName } = selectedLogService;
+    let active = true;
+    let es: EventSource;
+    let retryTimer: number;
+
+    setLogs([]);
+
+    const connect = () => {
+      if (!active) return;
+      es = new EventSource(`/api/projects/${projectName}/services/${serviceName}/logs`);
+      eventSourceRef.current = es;
+      es.onmessage = (event) => {
+        if (active) setLogs(prev => [...prev.slice(-999), event.data]);
+      };
+      es.onerror = () => {
+        es.close();
+        // Reconnect after 2 s so we survive service restarts and spring SSE resets
+        if (active) retryTimer = window.setTimeout(connect, 2000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      active = false;
+      clearTimeout(retryTimer);
+      if (es) es.close();
+      eventSourceRef.current = null;
+    };
+  }, [selectedLogService?.projectName, selectedLogService?.serviceName]);
+
   const handleAction = async (projectName: string, serviceName: string, action: string) => {
     try {
       await axios.post(`/api/projects/${projectName}/services/${serviceName}/${action}`);
@@ -203,23 +255,9 @@ function App() {
 
   const openLogs = (projectName: string, serviceName: string) => {
     setSelectedLogService({ projectName, serviceName });
-    setLogs([]);
-    
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-
-    const eventSource = new EventSource(`/api/projects/${projectName}/services/${serviceName}/logs`);
-    eventSource.onmessage = (event) => {
-      setLogs(prev => [...prev.slice(-999), event.data]);
-    };
-    eventSourceRef.current = eventSource;
   };
 
   const closeLogs = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
     setSelectedLogService(null);
   };
 
