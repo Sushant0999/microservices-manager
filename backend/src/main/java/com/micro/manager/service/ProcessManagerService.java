@@ -500,17 +500,28 @@ public class ProcessManagerService {
     public void addLogConsumer(String projectName, String name, Consumer<String> consumer) {
         String key = getServiceKey(projectName, name);
         List<String> serviceLogs = logs.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()));
-        synchronized (serviceLogs) {
-            for (String log : serviceLogs) {
-                try {
-                    consumer.accept(log);
-                } catch (Exception e) {
-                    // ignore
-                }
+        
+        executorService.submit(() -> {
+            // Give Spring Boot a moment to return the emitter and establish the HTTP/SSE connection
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-            logConsumers.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(consumer);
-        }
+            
+            synchronized (serviceLogs) {
+                for (String log : serviceLogs) {
+                    try {
+                        consumer.accept(log);
+                    } catch (Exception e) {
+                        return; // connection closed/broken, abort registration
+                    }
+                }
+                logConsumers.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(consumer);
+            }
+        });
     }
+
 
     public void removeLogConsumer(String projectName, String name, Consumer<String> consumer) {
         String key = getServiceKey(projectName, name);
