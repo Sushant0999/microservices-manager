@@ -11,4 +11,6 @@ public class ServiceConfig {
     private String startCommand;
     private String rebuildCommand;
     private String status = "STOPPED";
+    /** Optional: path to the properties/config file to use when starting this service. Null/empty = use default. */
+    private String activePropertiesFile;
 }

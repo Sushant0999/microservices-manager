@@ -13,6 +13,7 @@ interface Service {
   status: string;
   startCommand: string;
   rebuildCommand?: string;
+  activePropertiesFile?: string;
 }
 
 interface Project {
@@ -249,6 +250,7 @@ function App() {
   const [detectedFramework, setDetectedFramework] = useState<string>('');
   const [suggestedCommands, setSuggestedCommands] = useState<string[]>([]);
   const [suggestedRebuildCommands, setSuggestedRebuildCommands] = useState<string[]>([]);
+  const [propertiesFiles, setPropertiesFiles] = useState<string[]>([]);
 
   const logBottomRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -387,12 +389,14 @@ function App() {
       port: 8080,
       status: 'STOPPED',
       startCommand: '',
-      rebuildCommand: ''
+      rebuildCommand: '',
+      activePropertiesFile: ''
     });
     setEditingService(null);
     setSuggestedCommands([]);
     setSuggestedRebuildCommands([]);
     setDetectedFramework('');
+    setPropertiesFiles([]);
   };
 
   const startEditService = (service: Service) => {
@@ -483,16 +487,18 @@ function App() {
 
   const fetchSuggestions = async (path: string) => {
     try {
-      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }] = await Promise.all([
+      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }, { data: propsData }] = await Promise.all([
         axios.get(`/api/fs/suggest-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-rebuild-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-port?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/detect-framework?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/list-properties?path=${encodeURIComponent(path)}`),
       ]);
 
       setSuggestedCommands(data || []);
       setSuggestedRebuildCommands(rebuildData || []);
       setDetectedFramework(framework || '');
+      setPropertiesFiles(propsData || []);
 
       setFormData(prev => ({
         ...prev,
@@ -1051,6 +1057,38 @@ function App() {
                       {activeService.path}
                     </div>
                   </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label className="caps" style={{ color: 'var(--outline)', fontSize: '9px' }}>Start Command</label>
+                    <div style={{ background: 'var(--surface-container)', padding: '6px 10px', border: '1px solid var(--outline-variant)', wordBreak: 'break-all', color: 'var(--on-surface)' }}>
+                      {activeService.startCommand || <span style={{ color: 'var(--outline)', fontStyle: 'italic' }}>—</span>}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label className="caps" style={{ color: 'var(--outline)', fontSize: '9px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span className="material-symbols-outlined" style={{ fontSize: '10px' }}>description</span>
+                      Config File
+                    </label>
+                    <div style={{
+                      background: activeService.activePropertiesFile ? 'rgba(190, 194, 255, 0.07)' : 'var(--surface-container)',
+                      padding: '6px 10px',
+                      border: `1px solid ${activeService.activePropertiesFile ? 'var(--primary)' : 'var(--outline-variant)'}`,
+                      wordBreak: 'break-all',
+                      color: activeService.activePropertiesFile ? 'var(--primary)' : 'var(--outline)',
+                      fontStyle: activeService.activePropertiesFile ? 'normal' : 'italic',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}>
+                      {activeService.activePropertiesFile ? (
+                        <>
+                          <span className="material-symbols-outlined" style={{ fontSize: '12px', flexShrink: 0 }}>check_circle</span>
+                          {activeService.activePropertiesFile}
+                        </>
+                      ) : (
+                        'default (no override)'
+                      )}
+                    </div>
+                  </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       <label className="caps" style={{ color: 'var(--outline)', fontSize: '9px' }}>Port Mapping</label>
@@ -1067,6 +1105,7 @@ function App() {
                   </div>
                 </div>
               </div>
+
 
               {/* Editable Env variables */}
               <div style={{ marginBottom: '16px' }}>
@@ -1642,8 +1681,73 @@ function App() {
                 </div>
               </div>
             )}
+
+            {/* Properties / Config File Selector */}
+            <div className="form-field">
+              <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--primary)' }}>description</span>
+                Active Properties / Config File
+              </label>
+              {propertiesFiles.length > 0 ? (
+                <>
+                  <select
+                    className="form-select"
+                    value={formData.activePropertiesFile || ''}
+                    onChange={(e) => setFormData({ ...formData, activePropertiesFile: e.target.value })}
+                  >
+                    <option value="">(none — use default)</option>
+                    {propertiesFiles.map((f) => (
+                      <option key={f} value={f}>
+                        {f.replace(/\\/g, '/').split('/').pop()} — {f}
+                      </option>
+                    ))}
+                  </select>
+                  {formData.activePropertiesFile && (
+                    <div style={{
+                      marginTop: '6px',
+                      padding: '6px 10px',
+                      background: 'rgba(var(--primary-rgb, 190, 194, 255), 0.08)',
+                      border: '1px solid var(--outline-variant)',
+                      borderRadius: '2px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--primary)' }}>check_circle</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--on-surface)', wordBreak: 'break-all' }}>
+                        {formData.activePropertiesFile}
+                      </span>
+                      <button
+                        style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--outline)', padding: '2px' }}
+                        onClick={() => setFormData({ ...formData, activePropertiesFile: '' })}
+                        title="Clear selection"
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>close</span>
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. D:\configs\application-prod.properties"
+                    value={formData.activePropertiesFile || ''}
+                    onChange={(e) => setFormData({ ...formData, activePropertiesFile: e.target.value })}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
+                  />
+                  {formData.path && (
+                    <span style={{ fontSize: '11px', color: 'var(--outline)', whiteSpace: 'nowrap' }}>
+                      Select a path first to auto-detect files
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </DialogContent>
+
         <DialogActions sx={{ p: 3 }}>
           <Button onClick={() => setOpenForm(false)} sx={{ color: 'var(--outline)' }}>Cancel</Button>
           <Button

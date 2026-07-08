@@ -34,6 +34,45 @@ public class FileBrowserController {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
+    //  Properties / config file lister
+    // ──────────────────────────────────────────────────────────────────────────
+
+    @GetMapping("/list-properties")
+    public List<String> listProperties(@RequestParam String path) {
+        File dir = new File(path);
+        List<String> result = new ArrayList<>();
+        if (!dir.exists() || !dir.isDirectory()) return result;
+
+        // Directories to scan (root + Spring Boot resources dir)
+        List<File> scanDirs = new ArrayList<>();
+        scanDirs.add(dir);
+        File resourcesDir = new File(dir, "src/main/resources");
+        if (resourcesDir.exists() && resourcesDir.isDirectory()) {
+            scanDirs.add(resourcesDir);
+        }
+
+        for (File scanDir : scanDirs) {
+            File[] files = scanDir.listFiles(f ->
+                    f.isFile() && (
+                            f.getName().endsWith(".properties") ||
+                            f.getName().endsWith(".yml") ||
+                            f.getName().endsWith(".yaml") ||
+                            f.getName().equals(".env") ||
+                            f.getName().startsWith(".env.")
+                    )
+            );
+            if (files != null) {
+                for (File f : files) {
+                    result.add(f.getAbsolutePath());
+                }
+            }
+        }
+
+        java.util.Collections.sort(result);
+        return result;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
     //  Start-command suggestions
     // ──────────────────────────────────────────────────────────────────────────
 

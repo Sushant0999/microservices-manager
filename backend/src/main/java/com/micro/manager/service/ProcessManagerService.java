@@ -284,19 +284,37 @@ public class ProcessManagerService {
         if (config == null || activeProcesses.containsKey(key)) return;
 
         String os = System.getProperty("os.name").toLowerCase();
+        String startCmd = config.getStartCommand();
+
+        // Inject the selected properties/config file into the start command (if specified)
+        String propsFile = config.getActivePropertiesFile();
+        boolean hasPropsFile = propsFile != null && !propsFile.trim().isEmpty();
+
         ProcessBuilder pb;
         if (os.contains("win")) {
-            String startCmd = config.getStartCommand();
             if (startCmd.startsWith("./")) {
                 startCmd = startCmd.substring(2);
             }
+            if (hasPropsFile) {
+                startCmd = injectPropertiesFile(startCmd, propsFile);
+            }
             pb = new ProcessBuilder("cmd.exe", "/c", startCmd);
         } else {
-            pb = new ProcessBuilder("sh", "-c", config.getStartCommand());
+            if (hasPropsFile) {
+                startCmd = injectPropertiesFile(startCmd, propsFile);
+            }
+            pb = new ProcessBuilder("sh", "-c", startCmd);
         }
-        
+
         pb.directory(new File(config.getPath()));
         pb.redirectErrorStream(true);
+
+        // Set CONFIG_FILE env var as a universal fallback so any script can read it
+        if (hasPropsFile) {
+            pb.environment().put("CONFIG_FILE", propsFile);
+            pb.environment().put("SPRING_CONFIG_LOCATION", "file:" + propsFile);
+        }
+
         
         killProcessByPort(config.getPort());
         waitForPortFree(config.getPort());
@@ -370,6 +388,33 @@ public class ProcessManagerService {
             }
         }
     }
+
+    /**
+     * Appends the selected properties/config file to the start command in a
+     * framework-aware manner:
+     *   - Spring Boot (mvn / gradlew / java -jar): --spring.config.location=file:<path>
+     *   - uvicorn: --env-file <path>
+     *   - generic: appended as --config <path> (most CLIs accept this)
+     */
+    private String injectPropertiesFile(String cmd, String propsFile) {
+        String lower = cmd.toLowerCase();
+        // Spring Boot via Maven or Gradle wrapper
+        if (lower.contains("mvn") || lower.contains("gradlew") || lower.contains("gradle")) {
+            return cmd + " --spring.config.location=file:" + propsFile;
+        }
+        // Plain java -jar
+        if (lower.contains("java ") && lower.contains(".jar")) {
+            return cmd + " --spring.config.location=file:" + propsFile;
+        }
+        // uvicorn (FastAPI)
+        if (lower.contains("uvicorn")) {
+            return cmd + " --env-file " + propsFile;
+        }
+        // Generic fallback — pass as --config (many CLIs accept this)
+        return cmd + " --config " + propsFile;
+    }
+
+
 
     /**
      * Kills all processes listening on the given port.
