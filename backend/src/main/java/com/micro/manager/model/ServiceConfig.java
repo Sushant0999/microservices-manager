@@ -13,4 +13,6 @@ public class ServiceConfig {
     private String status = "STOPPED";
     /** Optional: path to the properties/config file to use when starting this service. Null/empty = use default. */
     private String activePropertiesFile;
+    /** Optional: name of the configured JDK to use. Null/empty = use default. */
+    private String jdkName;
 }

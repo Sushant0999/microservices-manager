@@ -3,6 +3,7 @@ package com.micro.manager.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.micro.manager.model.Project;
 import com.micro.manager.model.ServiceConfig;
+import com.micro.manager.model.JdkConfig;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,7 @@ public class ProcessManagerService {
     private final Map<String, Process> activeProcesses = new ConcurrentHashMap<>();
     private final Map<String, List<String>> logs = new ConcurrentHashMap<>();
     private final Map<String, List<Consumer<String>>> logConsumers = new ConcurrentHashMap<>();
+    private final List<JdkConfig> jdks = new CopyOnWriteArrayList<>();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     
     @org.springframework.beans.factory.annotation.Value("${server.port:9009}")
@@ -117,6 +119,11 @@ public class ProcessManagerService {
 
         try {
             Map<String, Object> rawMap = mapper.readValue(configFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            if (rawMap.containsKey("jdks")) {
+                List<JdkConfig> jdkList = mapper.convertValue(rawMap.get("jdks"), mapper.getTypeFactory().constructCollectionType(List.class, JdkConfig.class));
+                jdks.clear();
+                jdks.addAll(jdkList);
+            }
             if (rawMap.containsKey("projects")) {
                 List<Project> list = mapper.convertValue(rawMap.get("projects"), mapper.getTypeFactory().constructCollectionType(List.class, Project.class));
                 list.forEach(p -> {
@@ -164,8 +171,9 @@ public class ProcessManagerService {
         if (configFile == null) {
             configFile = new File("../services.json");
         }
-        Map<String, Collection<Project>> data = new HashMap<>();
+        Map<String, Object> data = new HashMap<>();
         data.put("projects", projects.values());
+        data.put("jdks", jdks);
         mapper.writerWithDefaultPrettyPrinter().writeValue(configFile, data);
     }
 
@@ -315,6 +323,7 @@ public class ProcessManagerService {
             pb.environment().put("SPRING_CONFIG_LOCATION", "file:" + propsFile);
         }
 
+        applyJdkEnvironment(config, pb);
         
         killProcessByPort(config.getPort());
         waitForPortFree(config.getPort());
@@ -602,11 +611,124 @@ public class ProcessManagerService {
         
         pb.directory(new File(config.getPath()));
         pb.redirectErrorStream(true);
+        applyJdkEnvironment(config, pb);
         Process process = pb.start();
 
         String key = getServiceKey(projectName, name);
         activeProcesses.put(key, process);
         logs.put(key, Collections.synchronizedList(new ArrayList<>()));
         executorService.submit(() -> captureLogs(projectName, name, process));
+    }
+
+    public Collection<JdkConfig> getJdks() {
+        return jdks;
+    }
+
+    public void addJdk(JdkConfig config) throws IOException {
+        boolean exists = jdks.stream().anyMatch(j -> j.getName().equalsIgnoreCase(config.getName()));
+        if (exists) {
+            throw new IllegalArgumentException("JDK configuration already exists: " + config.getName());
+        }
+        jdks.add(config);
+        saveConfigs();
+    }
+
+    public void updateJdk(String oldName, JdkConfig config) throws IOException {
+        JdkConfig existing = jdks.stream()
+                .filter(j -> j.getName().equalsIgnoreCase(oldName))
+                .findFirst()
+                .orElse(null);
+        if (existing == null) {
+            throw new IllegalArgumentException("JDK configuration not found: " + oldName);
+        }
+        existing.setName(config.getName());
+        existing.setWindowsPath(config.getWindowsPath());
+        existing.setLinuxPath(config.getLinuxPath());
+        existing.setMacPath(config.getMacPath());
+
+        // Update services that reference this JDK if name changed
+        if (!oldName.equalsIgnoreCase(config.getName())) {
+            for (Project p : projects.values()) {
+                if (p.getServices() != null) {
+                    for (ServiceConfig s : p.getServices()) {
+                        if (oldName.equalsIgnoreCase(s.getJdkName())) {
+                            s.setJdkName(config.getName());
+                        }
+                    }
+                }
+            }
+        }
+        saveConfigs();
+    }
+
+    public void removeJdk(String name) throws IOException {
+        boolean removed = jdks.removeIf(j -> j.getName().equalsIgnoreCase(name));
+        if (removed) {
+            // Nullify/reset the JDK configured on services using this deleted JDK
+            for (Project p : projects.values()) {
+                if (p.getServices() != null) {
+                    for (ServiceConfig s : p.getServices()) {
+                        if (name.equalsIgnoreCase(s.getJdkName())) {
+                            s.setJdkName(null);
+                        }
+                    }
+                }
+            }
+            saveConfigs();
+        }
+    }
+
+    private void applyJdkEnvironment(ServiceConfig config, ProcessBuilder pb) {
+        if (config.getJdkName() == null || config.getJdkName().trim().isEmpty()) {
+            return;
+        }
+        JdkConfig jdk = jdks.stream()
+                .filter(j -> j.getName().equalsIgnoreCase(config.getJdkName()))
+                .findFirst()
+                .orElse(null);
+        if (jdk == null) {
+            System.err.println("JDK configuration '" + config.getJdkName() + "' not found. Using default system Java.");
+            return;
+        }
+
+        String os = System.getProperty("os.name").toLowerCase();
+        String jdkPath = null;
+        if (os.contains("win")) {
+            jdkPath = jdk.getWindowsPath();
+        } else if (os.contains("mac") || os.contains("darwin")) {
+            jdkPath = jdk.getMacPath();
+        } else {
+            jdkPath = jdk.getLinuxPath();
+        }
+
+        if (jdkPath != null && !jdkPath.trim().isEmpty()) {
+            File jdkDir = new File(jdkPath);
+            if (jdkDir.exists()) {
+                // Set JAVA_HOME
+                pb.environment().put("JAVA_HOME", jdkPath);
+
+                // Prepend <jdkPath>/bin to PATH
+                String binDir = new File(jdkDir, "bin").getAbsolutePath();
+                String pathVar = null;
+                for (String key : pb.environment().keySet()) {
+                    if (key.equalsIgnoreCase("path")) {
+                        pathVar = key;
+                        break;
+                    }
+                }
+                if (pathVar == null) {
+                    pathVar = os.contains("win") ? "Path" : "PATH";
+                }
+
+                String oldPath = pb.environment().get(pathVar);
+                String pathSep = os.contains("win") ? ";" : ":";
+                String newPath = binDir + pathSep + (oldPath != null ? oldPath : "");
+                pb.environment().put(pathVar, newPath);
+                
+                System.out.println("Applied custom JDK '" + jdk.getName() + "' for service '" + config.getName() + "'. JAVA_HOME=" + jdkPath);
+            } else {
+                System.err.println("Configured JDK path does not exist: " + jdkPath + ". Falling back to default system JDK.");
+            }
+        }
     }
 }

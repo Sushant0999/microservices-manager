@@ -14,6 +14,14 @@ interface Service {
   startCommand: string;
   rebuildCommand?: string;
   activePropertiesFile?: string;
+  jdkName?: string;
+}
+
+interface JdkConfig {
+  name: string;
+  windowsPath: string;
+  linuxPath: string;
+  macPath: string;
 }
 
 interface Project {
@@ -233,7 +241,7 @@ function App() {
   // Service Add/Edit Form State
   const [openForm, setOpenForm] = useState(false);
   const [editingService, setEditingService] = useState<{ projectName: string; serviceName: string } | null>(null);
-  const [formData, setFormData] = useState<Service>({ name: '', projectName: 'Default', path: '', port: 8080, status: 'STOPPED', startCommand: '', rebuildCommand: '' });
+  const [formData, setFormData] = useState<Service>({ name: '', projectName: 'Default', path: '', port: 8080, status: 'STOPPED', startCommand: '', rebuildCommand: '', jdkName: '' });
 
   // Project Add/Edit Form State
   const [openProjectForm, setOpenProjectForm] = useState(false);
@@ -250,6 +258,12 @@ function App() {
   const [detectedFramework, setDetectedFramework] = useState<string>('');
   const [suggestedCommands, setSuggestedCommands] = useState<string[]>([]);
   const [suggestedRebuildCommands, setSuggestedRebuildCommands] = useState<string[]>([]);
+
+  // JDK management state
+  const [jdks, setJdks] = useState<JdkConfig[]>([]);
+  const [openJdkDialog, setOpenJdkDialog] = useState(false);
+  const [editingJdkName, setEditingJdkName] = useState<string | null>(null);
+  const [jdkFormData, setJdkFormData] = useState<JdkConfig>({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
   const [propertiesFiles, setPropertiesFiles] = useState<string[]>([]);
 
   const logBottomRef = useRef<HTMLDivElement>(null);
@@ -318,8 +332,44 @@ function App() {
     }
   };
 
+  const fetchJdks = async () => {
+    try {
+      const { data } = await axios.get('/api/jdks');
+      setJdks(data || []);
+    } catch (err) {
+      console.error('Failed to fetch JDKs', err);
+    }
+  };
+
+  const handleSaveJdk = async () => {
+    if (!jdkFormData.name.trim()) return;
+    try {
+      if (editingJdkName) {
+        await axios.put(`/api/jdks/${editingJdkName}`, jdkFormData);
+      } else {
+        await axios.post('/api/jdks', jdkFormData);
+      }
+      setOpenJdkDialog(false);
+      fetchJdks();
+    } catch (err) {
+      console.error('Failed to save JDK', err);
+    }
+  };
+
+  const handleDeleteJdk = async (name: string) => {
+    if (window.confirm(`Are you sure you want to delete JDK configuration "${name}"? Services configured with this JDK will fall back to using default system Java.`)) {
+      try {
+        await axios.delete(`/api/jdks/${name}`);
+        fetchJdks();
+      } catch (err) {
+        console.error('Failed to delete JDK', err);
+      }
+    }
+  };
+
   useEffect(() => {
     fetchProjects();
+    fetchJdks();
     const interval = setInterval(fetchProjects, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -390,7 +440,8 @@ function App() {
       status: 'STOPPED',
       startCommand: '',
       rebuildCommand: '',
-      activePropertiesFile: ''
+      activePropertiesFile: '',
+      jdkName: ''
     });
     setEditingService(null);
     setSuggestedCommands([]);
@@ -1344,6 +1395,65 @@ function App() {
           </div>
 
           <div style={{ background: 'var(--surface-container)', border: '1px solid var(--outline-variant)', borderRadius: '4px', padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 'bold', margin: 0, color: 'var(--primary)' }}>JDK Configurations</h3>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '4px 10px', fontSize: '12px' }}
+                onClick={() => {
+                  setEditingJdkName(null);
+                  setJdkFormData({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
+                  setOpenJdkDialog(true);
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '14px', marginRight: '4px' }}>add</span> Add JDK
+              </button>
+            </div>
+
+            {jdks.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '20px', color: 'var(--outline)', fontStyle: 'italic', fontSize: '13px' }}>
+                No custom JDKs configured. Using system default Java.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {jdks.map(jdk => (
+                  <div key={jdk.name} style={{ background: 'var(--surface-container-low)', border: '1px solid var(--outline-variant)', borderRadius: '4px', padding: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <div style={{ fontWeight: 'bold', fontSize: '14px', color: 'var(--on-surface)' }}>{jdk.name}</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '85px 1fr', gap: '4px', fontSize: '11px', fontFamily: 'var(--font-mono)' }}>
+                        <span style={{ color: 'var(--outline)' }}>Windows Path:</span>
+                        <span style={{ color: 'var(--on-surface-variant)', wordBreak: 'break-all' }}>{jdk.windowsPath || <span style={{ fontStyle: 'italic', color: 'var(--outline)' }}>not set</span>}</span>
+                        <span style={{ color: 'var(--outline)' }}>Linux Path:</span>
+                        <span style={{ color: 'var(--on-surface-variant)', wordBreak: 'break-all' }}>{jdk.linuxPath || <span style={{ fontStyle: 'italic', color: 'var(--outline)' }}>not set</span>}</span>
+                        <span style={{ color: 'var(--outline)' }}>macOS Path:</span>
+                        <span style={{ color: 'var(--on-surface-variant)', wordBreak: 'break-all' }}>{jdk.macPath || <span style={{ fontStyle: 'italic', color: 'var(--outline)' }}>not set</span>}</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px', marginLeft: '12px' }}>
+                      <button
+                        className="btn-icon warn"
+                        onClick={() => {
+                          setEditingJdkName(jdk.name);
+                          setJdkFormData({ ...jdk });
+                          setOpenJdkDialog(true);
+                        }}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit</span>
+                      </button>
+                      <button
+                        className="btn-icon danger"
+                        onClick={() => handleDeleteJdk(jdk.name)}
+                      >
+                        <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>delete</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background: 'var(--surface-container)', border: '1px solid var(--outline-variant)', borderRadius: '4px', padding: '20px' }}>
             <h3 style={{ fontSize: '15px', fontWeight: 'bold', marginBottom: '12px', color: 'var(--primary)' }}>System Information</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
@@ -1745,6 +1855,26 @@ function App() {
                 </div>
               )}
             </div>
+
+            {/* Target JDK Selector */}
+            <div className="form-field">
+              <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--primary)' }}>terminal</span>
+                Target JDK (Java Development Kit)
+              </label>
+              <select
+                className="form-select"
+                value={formData.jdkName || ''}
+                onChange={(e) => setFormData({ ...formData, jdkName: e.target.value })}
+              >
+                <option value="">System Default JDK</option>
+                {jdks.map((jdk) => (
+                  <option key={jdk.name} value={jdk.name}>
+                    {jdk.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </DialogContent>
 
@@ -1843,6 +1973,75 @@ function App() {
             sx={{ borderRadius: 1, background: 'var(--primary)', color: 'var(--on-primary)', fontWeight: 'bold', '&:hover': { opacity: 0.9 } }}
           >
             Save Variables
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* JDK Form Dialog */}
+      <Dialog
+        open={openJdkDialog}
+        onClose={() => setOpenJdkDialog(false)}
+        PaperProps={{ sx: { background: 'var(--surface-container)', color: 'var(--on-surface)', borderRadius: 2, border: '1px solid var(--outline-variant)', minWidth: '450px' } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          {editingJdkName ? 'Edit JDK Configuration' : 'Add JDK Configuration'}
+        </DialogTitle>
+        <DialogContent>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '12px' }}>
+            <div className="form-field">
+              <label className="form-label">JDK Name</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. Java 17, GraalVM 21"
+                value={jdkFormData.name}
+                disabled={!!editingJdkName}
+                onChange={(e) => setJdkFormData({ ...jdkFormData, name: e.target.value })}
+              />
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Windows Path</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. C:\Program Files\Java\jdk-17"
+                value={jdkFormData.windowsPath}
+                onChange={(e) => setJdkFormData({ ...jdkFormData, windowsPath: e.target.value })}
+              />
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">Linux Path</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. /usr/lib/jvm/java-17-openjdk"
+                value={jdkFormData.linuxPath}
+                onChange={(e) => setJdkFormData({ ...jdkFormData, linuxPath: e.target.value })}
+              />
+            </div>
+
+            <div className="form-field">
+              <label className="form-label">macOS Path</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home"
+                value={jdkFormData.macPath}
+                onChange={(e) => setJdkFormData({ ...jdkFormData, macPath: e.target.value })}
+              />
+            </div>
+          </div>
+        </DialogContent>
+        <DialogActions sx={{ p: 3 }}>
+          <Button onClick={() => setOpenJdkDialog(false)} sx={{ color: 'var(--outline)' }}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleSaveJdk}
+            sx={{ borderRadius: 1, background: 'var(--primary)', color: 'var(--on-primary)', fontWeight: 'bold', '&:hover': { opacity: 0.9 } }}
+          >
+            {editingJdkName ? 'Update JDK' : 'Add JDK'}
           </Button>
         </DialogActions>
       </Dialog>
