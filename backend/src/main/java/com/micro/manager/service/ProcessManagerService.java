@@ -113,6 +113,7 @@ public class ProcessManagerService {
             defaultProject.setName("Default");
             defaultProject.setDescription("Default Project");
             projects.put("Default", defaultProject);
+            autoDetectJdks();
             saveConfigs();
             return;
         }
@@ -124,6 +125,7 @@ public class ProcessManagerService {
                 jdks.clear();
                 jdks.addAll(jdkList);
             }
+            autoDetectJdks();
             if (rawMap.containsKey("projects")) {
                 List<Project> list = mapper.convertValue(rawMap.get("projects"), mapper.getTypeFactory().constructCollectionType(List.class, Project.class));
                 list.forEach(p -> {
@@ -320,7 +322,7 @@ public class ProcessManagerService {
         // Set CONFIG_FILE env var as a universal fallback so any script can read it
         if (hasPropsFile) {
             pb.environment().put("CONFIG_FILE", propsFile);
-            pb.environment().put("SPRING_CONFIG_LOCATION", "file:" + propsFile);
+            pb.environment().put("SPRING_CONFIG_ADDITIONAL_LOCATION", "file:" + propsFile);
         }
 
         applyJdkEnvironment(config, pb);
@@ -407,13 +409,17 @@ public class ProcessManagerService {
      */
     private String injectPropertiesFile(String cmd, String propsFile) {
         String lower = cmd.toLowerCase();
-        // Spring Boot via Maven or Gradle wrapper
-        if (lower.contains("mvn") || lower.contains("gradlew") || lower.contains("gradle")) {
-            return cmd + " --spring.config.location=file:" + propsFile;
+        // Spring Boot via Maven
+        if (lower.contains("mvn")) {
+            return cmd + " -Dspring-boot.run.arguments=--spring.config.additional-location=file:" + propsFile;
+        }
+        // Spring Boot via Gradle wrapper
+        if (lower.contains("gradlew") || lower.contains("gradle")) {
+            return cmd + " --args=\"--spring.config.additional-location=file:" + propsFile + "\"";
         }
         // Plain java -jar
         if (lower.contains("java ") && lower.contains(".jar")) {
-            return cmd + " --spring.config.location=file:" + propsFile;
+            return cmd + " --spring.config.additional-location=file:" + propsFile;
         }
         // uvicorn (FastAPI)
         if (lower.contains("uvicorn")) {
@@ -675,6 +681,214 @@ public class ProcessManagerService {
                 }
             }
             saveConfigs();
+        }
+    }
+
+    public void detectJdks() throws IOException {
+        autoDetectJdks();
+    }
+
+    private void autoDetectJdks() {
+        String os = System.getProperty("os.name").toLowerCase();
+        if (os.contains("mac") || os.contains("darwin")) {
+            detectMacJdks();
+        } else if (os.contains("win")) {
+            detectWindowsJdks();
+        } else {
+            detectLinuxJdks();
+        }
+    }
+
+    private void detectMacJdks() {
+        boolean modified = false;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("/usr/libexec/java_home", "-V");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split("\"");
+                    if (parts.length >= 5) {
+                        String name = parts[3].trim();
+                        String path = parts[4].trim();
+                        File homeDir = new File(path);
+                        if (homeDir.exists() && homeDir.isDirectory()) {
+                            JdkConfig existingByName = jdks.stream()
+                                    .filter(j -> name.equalsIgnoreCase(j.getName()))
+                                    .findFirst()
+                                    .orElse(null);
+                            if (existingByName != null) {
+                                if (existingByName.getMacPath() == null || existingByName.getMacPath().trim().isEmpty()) {
+                                    existingByName.setMacPath(path);
+                                    modified = true;
+                                }
+                            } else {
+                                boolean pathExists = jdks.stream().anyMatch(j -> path.equalsIgnoreCase(j.getMacPath()));
+                                if (!pathExists) {
+                                    String finalName = name;
+                                    int counter = 1;
+                                    while (true) {
+                                        final String searchName = finalName;
+                                        boolean nameExists = jdks.stream().anyMatch(j -> searchName.equalsIgnoreCase(j.getName()));
+                                        if (!nameExists) {
+                                            break;
+                                        }
+                                        finalName = name + " (" + counter + ")";
+                                        counter++;
+                                    }
+                                    JdkConfig config = new JdkConfig();
+                                    config.setName(finalName);
+                                    config.setMacPath(path);
+                                    jdks.add(config);
+                                    modified = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            p.waitFor();
+        } catch (Exception e) {
+            System.err.println("Error auto-detecting Mac JDKs: " + e.getMessage());
+        }
+        if (modified) {
+            try {
+                saveConfigs();
+            } catch (IOException e) {
+                System.err.println("Failed to save configs after Mac JDK auto-detection: " + e.getMessage());
+            }
+        }
+    }
+
+    private void detectWindowsJdks() {
+        List<String> commonDirs = Arrays.asList(
+            "C:\\Program Files\\Java",
+            "C:\\Program Files\\Eclipse Foundation",
+            "C:\\Program Files\\Eclipse Adoptium",
+            "C:\\Program Files\\AdoptOpenJDK",
+            "C:\\Program Files\\Amazon Corretto",
+            "C:\\Program Files\\Zulu",
+            "C:\\Program Files\\BellSoft",
+            System.getProperty("user.home") + "\\.jdks"
+        );
+        boolean modified = false;
+        for (String parentPath : commonDirs) {
+            File parent = new File(parentPath);
+            if (parent.exists() && parent.isDirectory()) {
+                File[] children = parent.listFiles();
+                if (children != null) {
+                    for (File child : children) {
+                        if (child.isDirectory()) {
+                            File javaExe = new File(child, "bin\\java.exe");
+                            if (javaExe.exists()) {
+                                String path = child.getAbsolutePath();
+                                String name = child.getName();
+                                JdkConfig existingByName = jdks.stream()
+                                        .filter(j -> name.equalsIgnoreCase(j.getName()))
+                                        .findFirst()
+                                        .orElse(null);
+                                if (existingByName != null) {
+                                    if (existingByName.getWindowsPath() == null || existingByName.getWindowsPath().trim().isEmpty()) {
+                                        existingByName.setWindowsPath(path);
+                                        modified = true;
+                                    }
+                                } else {
+                                    boolean pathExists = jdks.stream().anyMatch(j -> path.equalsIgnoreCase(j.getWindowsPath()));
+                                    if (!pathExists) {
+                                        String finalName = name;
+                                        int counter = 1;
+                                        while (true) {
+                                            final String searchName = finalName;
+                                            boolean nameExists = jdks.stream().anyMatch(j -> searchName.equalsIgnoreCase(j.getName()));
+                                            if (!nameExists) {
+                                                break;
+                                            }
+                                            finalName = name + " (" + counter + ")";
+                                            counter++;
+                                        }
+                                        JdkConfig config = new JdkConfig();
+                                        config.setName(finalName);
+                                        config.setWindowsPath(path);
+                                        jdks.add(config);
+                                        modified = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (modified) {
+            try {
+                saveConfigs();
+            } catch (IOException e) {
+                System.err.println("Failed to save configs after Windows JDK auto-detection: " + e.getMessage());
+            }
+        }
+    }
+
+    private void detectLinuxJdks() {
+        List<String> commonDirs = Arrays.asList(
+            "/usr/lib/jvm",
+            "/usr/java",
+            "/opt"
+        );
+        boolean modified = false;
+        for (String parentPath : commonDirs) {
+            File parent = new File(parentPath);
+            if (parent.exists() && parent.isDirectory()) {
+                File[] children = parent.listFiles();
+                if (children != null) {
+                    for (File child : children) {
+                        if (child.isDirectory()) {
+                            File javaBin = new File(child, "bin/java");
+                            if (javaBin.exists()) {
+                                String path = child.getAbsolutePath();
+                                String name = child.getName();
+                                JdkConfig existingByName = jdks.stream()
+                                        .filter(j -> name.equalsIgnoreCase(j.getName()))
+                                        .findFirst()
+                                        .orElse(null);
+                                if (existingByName != null) {
+                                    if (existingByName.getLinuxPath() == null || existingByName.getLinuxPath().trim().isEmpty()) {
+                                        existingByName.setLinuxPath(path);
+                                        modified = true;
+                                    }
+                                } else {
+                                    boolean pathExists = jdks.stream().anyMatch(j -> path.equalsIgnoreCase(j.getLinuxPath()));
+                                    if (!pathExists) {
+                                        String finalName = name;
+                                        int counter = 1;
+                                        while (true) {
+                                            final String searchName = finalName;
+                                            boolean nameExists = jdks.stream().anyMatch(j -> searchName.equalsIgnoreCase(j.getName()));
+                                            if (!nameExists) {
+                                                break;
+                                            }
+                                            finalName = name + " (" + counter + ")";
+                                            counter++;
+                                        }
+                                        JdkConfig config = new JdkConfig();
+                                        config.setName(finalName);
+                                        config.setLinuxPath(path);
+                                        jdks.add(config);
+                                        modified = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (modified) {
+            try {
+                saveConfigs();
+            } catch (IOException e) {
+                System.err.println("Failed to save configs after Linux JDK auto-detection: " + e.getMessage());
+            }
         }
     }
 

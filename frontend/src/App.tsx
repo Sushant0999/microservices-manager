@@ -261,6 +261,7 @@ function App() {
 
   // JDK management state
   const [jdks, setJdks] = useState<JdkConfig[]>([]);
+  const [scanningJdks, setScanningJdks] = useState(false);
   const [openJdkDialog, setOpenJdkDialog] = useState(false);
   const [editingJdkName, setEditingJdkName] = useState<string | null>(null);
   const [jdkFormData, setJdkFormData] = useState<JdkConfig>({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
@@ -338,6 +339,19 @@ function App() {
       setJdks(data || []);
     } catch (err) {
       console.error('Failed to fetch JDKs', err);
+    }
+  };
+
+  const handleScanJdks = async () => {
+    setScanningJdks(true);
+    try {
+      const { data } = await axios.post('/api/jdks/detect');
+      setJdks(data || []);
+    } catch (err) {
+      console.error('Failed to scan JDKs', err);
+      alert('Failed to scan system JDKs.');
+    } finally {
+      setScanningJdks(false);
     }
   };
 
@@ -1397,17 +1411,30 @@ function App() {
           <div style={{ background: 'var(--surface-container)', border: '1px solid var(--outline-variant)', borderRadius: '4px', padding: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <h3 style={{ fontSize: '15px', fontWeight: 'bold', margin: 0, color: 'var(--primary)' }}>JDK Configurations</h3>
-              <button
-                className="btn btn-ghost"
-                style={{ padding: '4px 10px', fontSize: '12px' }}
-                onClick={() => {
-                  setEditingJdkName(null);
-                  setJdkFormData({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
-                  setOpenJdkDialog(true);
-                }}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '14px', marginRight: '4px' }}>add</span> Add JDK
-              </button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  className="btn btn-ghost"
+                  style={{ padding: '4px 10px', fontSize: '12px' }}
+                  disabled={scanningJdks}
+                  onClick={handleScanJdks}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px', marginRight: '4px' }}>
+                    {scanningJdks ? 'hourglass_empty' : 'sync'}
+                  </span>
+                  {scanningJdks ? 'Scanning...' : 'Scan System JDKs'}
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{ padding: '4px 10px', fontSize: '12px' }}
+                  onClick={() => {
+                    setEditingJdkName(null);
+                    setJdkFormData({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
+                    setOpenJdkDialog(true);
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px', marginRight: '4px' }}>add</span> Add JDK
+                </button>
+              </div>
             </div>
 
             {jdks.length === 0 ? (

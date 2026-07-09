@@ -26,6 +26,12 @@ public class JdkController {
         processManager.addJdk(config);
     }
 
+    @PostMapping("/detect")
+    public Collection<JdkConfig> detectJdks() throws IOException {
+        processManager.detectJdks();
+        return processManager.getJdks();
+    }
+
     @PutMapping("/{name}")
     public void updateJdk(@PathVariable String name, @RequestBody JdkConfig config) throws IOException {
         processManager.updateJdk(name, config);
