@@ -1649,7 +1649,7 @@ function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
                 <span style={{ color: 'var(--outline)' }}>App Version</span>
-                <span style={{ fontFamily: 'var(--font-mono)' }}>v2.4.1-Stable</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>v2.5.0-Stable</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '6px' }}>
                 <span style={{ color: 'var(--outline)' }}>Java Runtime</span>
@@ -1686,8 +1686,8 @@ function App() {
       {/* Main Sidebar Navigation */}
       <aside className="sidebar" style={{ width: '260px' }}>
         <div className="sidebar-logo">
-          <h1>Micorservice Manager</h1>
-          <p>V2.4.1-Stable</p>
+          <h1>Microservice Manager</h1>
+          <p>V2.5.0-Stable</p>
         </div>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '16px', flex: 1 }}>
