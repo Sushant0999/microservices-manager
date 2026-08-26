@@ -10,6 +10,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.List;
 import java.util.function.Consumer;
 
 @RestController
@@ -43,6 +44,20 @@ public class ProjectController {
     @PostMapping("/{projectName}/services")
     public void addService(@PathVariable String projectName, @RequestBody ServiceConfig config) throws IOException {
         processManager.addService(projectName, config);
+    }
+
+    @PostMapping("/{projectName}/services/batch")
+    public void addServicesBatch(@PathVariable String projectName, @RequestBody List<ServiceConfig> configs) throws IOException {
+        for (ServiceConfig config : configs) {
+            try {
+                processManager.addService(projectName, config);
+            } catch (IllegalArgumentException e) {
+                // If service exists, update it with new config
+                try {
+                    processManager.updateService(projectName, config.getName(), config);
+                } catch (Exception ignored) {}
+            }
+        }
     }
 
     @PutMapping("/{projectName}/services/{name}")

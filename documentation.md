@@ -301,7 +301,10 @@ Utility REST controller providing filesystem intelligence to the UI.
 | `/api/fs/suggest-commands?path=` | GET | Heuristic start-command suggestions |
 | `/api/fs/suggest-rebuild-commands?path=` | GET | Heuristic rebuild-command suggestions |
 | `/api/fs/suggest-port?path=` | GET | Infers the service's listening port |
+| `/api/fs/suggest-name?path=` | GET | Infers the service name from `application.properties` / `pom.xml` |
 | `/api/fs/detect-framework?path=` | GET | Returns a framework identifier string |
+| `/api/fs/suggest-jdk?path=` | GET | Detects Java & Spring Boot version and auto-selects matching JDK |
+| `/api/fs/scan-services?path=&maxDepth=` | GET | Recursively scans directory for nested microservices (`pom.xml` / `build.gradle`) |
 
 **Framework detection logic (in priority order):**
 
@@ -386,15 +389,21 @@ Delete project and stop all its services.
 #### `POST /api/projects/{projectName}/services`
 Add a new service.
 
+#### `POST /api/projects/{projectName}/services/batch`
+Batch add or update multiple services in a single request.
+
 **Request body:**
 ```json
-{
-  "name": "auth-service",
-  "path": "D:\\codes\\myapp\\auth-service",
-  "port": 8081,
-  "startCommand": "mvn spring-boot:run",
-  "rebuildCommand": "mvn clean install -DskipTests"
-}
+[
+  {
+    "name": "auth-service",
+    "path": "D:\\codes\\myapp\\auth-service",
+    "port": 8081,
+    "startCommand": "mvn spring-boot:run",
+    "rebuildCommand": "mvn clean install -DskipTests",
+    "jdkName": "Corretto 17"
+  }
+]
 ```
 
 #### `PUT /api/projects/{projectName}/services/{name}`
@@ -434,8 +443,32 @@ Returns ordered list of suggested rebuild commands.
 #### `GET /api/fs/suggest-port?path=<absolute-path>`
 Returns a single integer — the inferred port.
 
+#### `GET /api/fs/suggest-name?path=<absolute-path>`
+Returns a string — the inferred service name.
+**Resolution priority:**
+1. Spring Boot `spring.application.name` in `application.properties` / `application.yml` / `application.yaml` / `bootstrap.properties` / `bootstrap.yml`
+2. Maven `pom.xml` (`<artifactId>` or `<name>`)
+3. Gradle `settings.gradle` (`rootProject.name`) or `build.gradle` (`archivesBaseName`)
+4. `package.json` (`"name"`)
+5. Folder directory name fallback
+
 #### `GET /api/fs/detect-framework?path=<absolute-path>`
 Returns a string like `spring-boot`, `react-vite`, `python-fastapi`, etc.
+
+#### `GET /api/fs/suggest-jdk?path=<absolute-path>`
+Returns a JSON `JdkSuggestion` object containing detected Java/Spring Boot versions and matched JDK.
+
+#### `GET /api/fs/scan-services?path=<absolute-path>&maxDepth=<n>`
+Recursively traverses directories up to `maxDepth` (default 4) looking for `pom.xml`, `build.gradle`, `build.gradle.kts`, `package.json`, etc.
+Returns `List<DiscoveredService>` containing name, port, relativePath, startCommand, framework, and matched JDK for every microservice found.
+
+**Detection Strategy:**
+1. **`pom.xml` explicit properties:** `<java.version>`, `<maven.compiler.source>`, `<maven.compiler.target>`, `<maven.compiler.release>`, `<jdk.version>`, etc.
+2. **`pom.xml` compiler plugin:** `maven-compiler-plugin` `<configuration>` (`<release>`, `<target>`, `<source>`).
+3. **Spring Boot parent/dependency version:** Spring Boot 3.x+ $\rightarrow$ Java 17+, Spring Boot 2.5–2.7 $\rightarrow$ Java 11, Spring Boot 2.0–2.4 $\rightarrow$ Java 8, Spring Boot 1.x $\rightarrow$ Java 8.
+4. **Dependency heuristics:** `jakarta.*` $\rightarrow$ Java 17+, `javax.*` $\rightarrow$ Java 8, Spring 6.x $\rightarrow$ Java 17+, Quarkus 3.x $\rightarrow$ Java 17+, Micronaut 4.x $\rightarrow$ Java 17+.
+5. **Fallback:** `build.gradle` / `build.gradle.kts` (`jvmToolchain`, `sourceCompatibility`, Spring Boot plugin), `.java-version`, `system.properties`.
+6. **Auto-matching:** Matches detected version against configured JDKs and auto-selects the best JDK in the UI.
 
 ---
 

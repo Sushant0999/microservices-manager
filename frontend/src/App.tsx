@@ -24,6 +24,27 @@ interface JdkConfig {
   macPath: string;
 }
 
+interface JdkSuggestion {
+  detectedJavaVersion?: string;
+  rawJavaVersion?: string;
+  detectedSpringBootVersion?: string;
+  detectionSource?: string;
+  suggestedJdkName?: string;
+  matchingJdkFound?: boolean;
+}
+
+interface DiscoveredService {
+  name: string;
+  path: string;
+  relativePath: string;
+  port: number;
+  startCommand: string;
+  rebuildCommand: string;
+  framework: string;
+  jdkName?: string;
+  detectedJavaVersion?: string;
+}
+
 interface Project {
   name: string;
   description: string;
@@ -252,6 +273,8 @@ function App() {
   const [openBrowse, setOpenBrowse] = useState(false);
   const [currentPath, setCurrentPath] = useState('');
   const [dirs, setDirs] = useState<string[]>([]);
+  const [browseHistory, setBrowseHistory] = useState<string[]>([]);
+  const [browseHistoryIndex, setBrowseHistoryIndex] = useState<number>(-1);
 
   // Display View Mode State (List vs Grid)
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
@@ -261,11 +284,19 @@ function App() {
 
   // JDK management state
   const [jdks, setJdks] = useState<JdkConfig[]>([]);
+  const [detectedJdkInfo, setDetectedJdkInfo] = useState<JdkSuggestion | null>(null);
   const [scanningJdks, setScanningJdks] = useState(false);
   const [openJdkDialog, setOpenJdkDialog] = useState(false);
   const [editingJdkName, setEditingJdkName] = useState<string | null>(null);
   const [jdkFormData, setJdkFormData] = useState<JdkConfig>({ name: '', windowsPath: '', linuxPath: '', macPath: '' });
   const [propertiesFiles, setPropertiesFiles] = useState<string[]>([]);
+
+  // Discovered Services State
+  const [discoveredServices, setDiscoveredServices] = useState<DiscoveredService[]>([]);
+  const [selectedDiscovered, setSelectedDiscovered] = useState<Record<string, boolean>>({});
+  const [openDiscoveryModal, setOpenDiscoveryModal] = useState<boolean>(false);
+  const [scanningServices, setScanningServices] = useState<boolean>(false);
+  const [targetProjectForDiscovery, setTargetProjectForDiscovery] = useState<string>('Default');
 
   const logBottomRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -462,6 +493,7 @@ function App() {
     setSuggestedRebuildCommands([]);
     setDetectedFramework('');
     setPropertiesFiles([]);
+    setDetectedJdkInfo(null);
   };
 
   const startEditService = (service: Service) => {
@@ -539,37 +571,156 @@ function App() {
     }
   };
 
-  const browseDirs = async (path: string = '') => {
+  const getParentPath = (p: string) => {
+    if (!p) return '';
+    const clean = (p.endsWith('/') || p.endsWith('\\')) && p.length > 1 ? p.slice(0, -1) : p;
+    const lastSlash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+    if (lastSlash === -1) return '';
+    if (lastSlash === 0) return '/';
+    if (clean.length === 3 && clean[1] === ':') return '';
+    return clean.substring(0, lastSlash);
+  };
+
+  const getFolderName = (p: string) => {
+    if (!p) return '';
+    const clean = (p.endsWith('/') || p.endsWith('\\')) && p.length > 1 ? p.slice(0, -1) : p;
+    const parts = clean.split(/[/\\]/);
+    return parts.pop() || clean;
+  };
+
+  const browseDirs = async (path: string = '', recordHistory: boolean = true) => {
     try {
       const { data } = await axios.get(`/api/fs/browse?path=${encodeURIComponent(path)}`);
-      setDirs(data);
+      setDirs(data || []);
       setCurrentPath(path);
       setOpenBrowse(true);
+      if (recordHistory) {
+        setBrowseHistory(prev => {
+          const next = prev.slice(0, browseHistoryIndex + 1);
+          next.push(path);
+          return next;
+        });
+        setBrowseHistoryIndex(prev => prev + 1);
+      }
     } catch (err) {
       console.error('Failed to browse directories', err);
     }
   };
 
+  const handleBrowseBack = () => {
+    if (browseHistoryIndex > 0) {
+      const prevIdx = browseHistoryIndex - 1;
+      setBrowseHistoryIndex(prevIdx);
+      browseDirs(browseHistory[prevIdx], false);
+    }
+  };
+
+  const handleBrowseForward = () => {
+    if (browseHistoryIndex < browseHistory.length - 1) {
+      const nextIdx = browseHistoryIndex + 1;
+      setBrowseHistoryIndex(nextIdx);
+      browseDirs(browseHistory[nextIdx], false);
+    }
+  };
+
+  const handleBrowseUp = () => {
+    const parent = getParentPath(currentPath);
+    browseDirs(parent, true);
+  };
+
+  const handleScanDirectoryForServices = async (scanPath: string) => {
+    if (!scanPath) return;
+    setScanningServices(true);
+    try {
+      const { data } = await axios.get<DiscoveredService[]>(`/api/fs/scan-services?path=${encodeURIComponent(scanPath)}&maxDepth=4`);
+      const services = data || [];
+      if (services.length === 0) {
+        alert(`No microservices with pom.xml or build.gradle were found in: ${scanPath}`);
+      } else if (services.length === 1 && openForm) {
+        const s = services[0];
+        setFormData(prev => ({
+          ...prev,
+          name: s.name,
+          path: s.path,
+          port: s.port,
+          startCommand: s.startCommand,
+          rebuildCommand: s.rebuildCommand,
+          jdkName: s.jdkName || prev.jdkName
+        }));
+        setDetectedFramework(s.framework || '');
+        setOpenBrowse(false);
+      } else {
+        setDiscoveredServices(services);
+        const initialSelected: Record<string, boolean> = {};
+        services.forEach(s => {
+          initialSelected[s.path] = true;
+        });
+        setSelectedDiscovered(initialSelected);
+        setTargetProjectForDiscovery(selectedProject !== 'All' ? selectedProject : (projects[0]?.name || 'Default'));
+        setOpenDiscoveryModal(true);
+        setOpenBrowse(false);
+      }
+    } catch (err) {
+      console.error('Failed to scan directory for services', err);
+      alert('Error scanning directory for services.');
+    } finally {
+      setScanningServices(false);
+    }
+  };
+
+  const handleImportDiscoveredServices = async () => {
+    const toImport = discoveredServices.filter(s => selectedDiscovered[s.path]);
+    if (toImport.length === 0) {
+      alert('Please select at least one service to import.');
+      return;
+    }
+
+    try {
+      const payload = toImport.map(s => ({
+        name: s.name,
+        projectName: targetProjectForDiscovery,
+        path: s.path,
+        port: s.port,
+        startCommand: s.startCommand,
+        rebuildCommand: s.rebuildCommand,
+        status: 'STOPPED',
+        jdkName: s.jdkName || ''
+      }));
+
+      await axios.post(`/api/projects/${targetProjectForDiscovery}/services/batch`, payload);
+      setOpenDiscoveryModal(false);
+      fetchProjects();
+    } catch (err) {
+      console.error('Failed to import discovered services', err);
+      alert('Failed to import some or all services.');
+    }
+  };
+
   const fetchSuggestions = async (path: string) => {
     try {
-      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }, { data: propsData }] = await Promise.all([
+      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }, { data: propsData }, { data: jdkSuggestion }, { data: nameData }] = await Promise.all([
         axios.get(`/api/fs/suggest-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-rebuild-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-port?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/detect-framework?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/list-properties?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/suggest-jdk?path=${encodeURIComponent(path)}`),
+        axios.get(`/api/fs/suggest-name?path=${encodeURIComponent(path)}`),
       ]);
 
       setSuggestedCommands(data || []);
       setSuggestedRebuildCommands(rebuildData || []);
       setDetectedFramework(framework || '');
       setPropertiesFiles(propsData || []);
+      setDetectedJdkInfo(jdkSuggestion || null);
 
       setFormData(prev => ({
         ...prev,
+        name: prev.name ? prev.name : (nameData || getFolderName(path) || ''),
         startCommand: prev.startCommand || (data?.[0] || ''),
         rebuildCommand: prev.rebuildCommand || (rebuildData?.[0] || ''),
-        port: portData ? portData : prev.port
+        port: portData ? portData : prev.port,
+        jdkName: jdkSuggestion?.suggestedJdkName ? jdkSuggestion.suggestedJdkName : prev.jdkName
       }));
     } catch (err) {
       console.error('Failed to fetch suggestions', err);
@@ -910,6 +1061,19 @@ function App() {
               <button className="btn btn-ghost" onClick={fetchProjects}>
                 <span className="material-symbols-outlined">refresh</span>
                 Refresh
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setBrowseHistory(['']);
+                  setBrowseHistoryIndex(0);
+                  browseDirs('', false);
+                }}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                title="Scan any folder to discover all nested microservices"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: 'var(--tertiary)' }}>travel_explore</span>
+                Scan Workspace
               </button>
               <button className="btn btn-primary" onClick={() => { resetForm(); setOpenForm(true); }}>
                 Add Service
@@ -1681,7 +1845,12 @@ function App() {
                 />
                 <button
                   className="btn btn-ghost"
-                  onClick={() => browseDirs(formData.path || '')}
+                  onClick={() => {
+                    const initialPath = formData.path || '';
+                    setBrowseHistory([initialPath]);
+                    setBrowseHistoryIndex(0);
+                    browseDirs(initialPath, false);
+                  }}
                   style={{ minWidth: 'auto', padding: '0 12px' }}
                 >
                   <span className="material-symbols-outlined">folder_open</span>
@@ -1901,6 +2070,29 @@ function App() {
                   </option>
                 ))}
               </select>
+              {detectedJdkInfo && detectedJdkInfo.detectedJavaVersion && (
+                <div style={{
+                  marginTop: '6px',
+                  padding: '6px 10px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: detectedJdkInfo.matchingJdkFound ? 'rgba(74, 222, 128, 0.1)' : 'rgba(251, 191, 36, 0.1)',
+                  border: `1px solid ${detectedJdkInfo.matchingJdkFound ? 'rgba(74, 222, 128, 0.25)' : 'rgba(251, 191, 36, 0.25)'}`,
+                  color: detectedJdkInfo.matchingJdkFound ? '#4ade80' : '#fbbf24'
+                }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>
+                    {detectedJdkInfo.matchingJdkFound ? 'auto_awesome' : 'info'}
+                  </span>
+                  <span>
+                    {detectedJdkInfo.matchingJdkFound
+                      ? `Auto-selected ${detectedJdkInfo.suggestedJdkName} (Detected Java ${detectedJdkInfo.detectedJavaVersion} via ${detectedJdkInfo.detectionSource})`
+                      : `Detected Java ${detectedJdkInfo.detectedJavaVersion} (${detectedJdkInfo.detectionSource}). No matching JDK found in settings.`}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </DialogContent>
@@ -1921,52 +2113,305 @@ function App() {
       <Dialog
         open={openBrowse}
         onClose={() => setOpenBrowse(false)}
-        PaperProps={{ sx: { background: 'var(--surface-container-lowest)', color: 'var(--on-surface)', borderRadius: 2, border: '1px solid var(--outline-variant)', minWidth: '500px' } }}
+        PaperProps={{ sx: { background: 'var(--surface-container-lowest)', color: 'var(--on-surface)', borderRadius: 2, border: '1px solid var(--outline-variant)', minWidth: '540px' } }}
       >
         <DialogTitle sx={{ borderBottom: '1px solid var(--outline-variant)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span className="material-symbols-outlined" style={{ color: 'var(--primary)' }}>folder_open</span>
-            <span style={{ fontWeight: 700 }}>Select Folder</span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="material-symbols-outlined" style={{ color: 'var(--primary)' }}>folder_open</span>
+              <span style={{ fontWeight: 700 }}>Select Folder</span>
+            </div>
+            <button className="btn-icon" onClick={() => setOpenBrowse(false)}>
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+            </button>
           </div>
         </DialogTitle>
         <DialogContent>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '16px' }}>
-            <div className="browse-path-bar">
-              <span style={{ flex: 1, wordBreak: 'break-all' }}>{currentPath || 'Drive Roots'}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
+            {/* Navigation Controls & Path Bar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <button
                 className="btn-icon"
-                onClick={() => browseDirs(currentPath.substring(0, currentPath.lastIndexOf('\\')))}
-                disabled={!currentPath}
+                onClick={handleBrowseBack}
+                disabled={browseHistoryIndex <= 0}
+                title="Go Back"
+                style={{
+                  opacity: browseHistoryIndex > 0 ? 1 : 0.4,
+                  cursor: browseHistoryIndex > 0 ? 'pointer' : 'default',
+                  padding: '6px',
+                  background: 'var(--surface-container-low)',
+                  border: '1px solid var(--outline-variant)',
+                  borderRadius: '4px'
+                }}
               >
-                <span className="material-symbols-outlined">arrow_upward</span>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>arrow_back</span>
               </button>
+              <button
+                className="btn-icon"
+                onClick={handleBrowseForward}
+                disabled={browseHistoryIndex >= browseHistory.length - 1}
+                title="Go Forward"
+                style={{
+                  opacity: browseHistoryIndex < browseHistory.length - 1 ? 1 : 0.4,
+                  cursor: browseHistoryIndex < browseHistory.length - 1 ? 'pointer' : 'default',
+                  padding: '6px',
+                  background: 'var(--surface-container-low)',
+                  border: '1px solid var(--outline-variant)',
+                  borderRadius: '4px'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>arrow_forward</span>
+              </button>
+              <button
+                className="btn-icon"
+                onClick={handleBrowseUp}
+                disabled={!currentPath}
+                title="Go Up to Parent Directory"
+                style={{
+                  opacity: currentPath ? 1 : 0.4,
+                  cursor: currentPath ? 'pointer' : 'default',
+                  padding: '6px',
+                  background: 'var(--surface-container-low)',
+                  border: '1px solid var(--outline-variant)',
+                  borderRadius: '4px'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>arrow_upward</span>
+              </button>
+              <button
+                className="btn-icon"
+                onClick={() => browseDirs('', true)}
+                title="Drive Roots / Home"
+                style={{
+                  padding: '6px',
+                  background: 'var(--surface-container-low)',
+                  border: '1px solid var(--outline-variant)',
+                  borderRadius: '4px'
+                }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>home</span>
+              </button>
+              
+              <div className="browse-path-bar" style={{ flex: 1, margin: 0 }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '15px', color: 'var(--outline)' }}>folder</span>
+                <span style={{ flex: 1, wordBreak: 'break-all', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {currentPath || 'Drive Roots'}
+                </span>
+              </div>
             </div>
 
-            <div className="browse-list">
-              {dirs.map((dir, i) => (
+            {/* Folder List */}
+            <div className="browse-list" style={{ minHeight: '220px', maxHeight: '300px' }}>
+              {currentPath && (
                 <div
-                  key={i}
                   className="browse-item"
-                  onClick={() => browseDirs(dir)}
-                  onDoubleClick={() => handleSelectPath(dir)}
+                  onClick={handleBrowseUp}
+                  style={{ fontWeight: 600, color: 'var(--primary)', borderBottom: '1px dashed var(--outline-variant)' }}
                 >
-                  <span className="material-symbols-outlined">folder</span>
-                  <span>{dir.split('\\').pop() || dir}</span>
+                  <span className="material-symbols-outlined" style={{ color: 'var(--primary)' }}>drive_folder_upload</span>
+                  <span>.. (Go back to parent directory)</span>
                 </div>
-              ))}
+              )}
+              {dirs.length === 0 ? (
+                <div style={{ padding: '24px', textAlign: 'center', color: 'var(--outline)', fontSize: '13px' }}>
+                  No subdirectories found
+                </div>
+              ) : (
+                dirs.map((dir, i) => (
+                  <div
+                    key={i}
+                    className="browse-item"
+                    onClick={() => browseDirs(dir, true)}
+                    onDoubleClick={() => handleSelectPath(dir)}
+                  >
+                    <span className="material-symbols-outlined">folder</span>
+                    <span>{getFolderName(dir)}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </DialogContent>
-        <DialogActions sx={{ p: 3 }}>
-          <Button onClick={() => setOpenBrowse(false)} sx={{ color: 'var(--outline)' }}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={() => handleSelectPath(currentPath)}
-            disabled={!currentPath}
-            sx={{ background: 'var(--primary)', color: 'var(--on-primary)', fontWeight: 'bold' }}
-          >
-            Select Current Folder
-          </Button>
+        <DialogActions sx={{ p: 3, justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Button
+              variant="outlined"
+              onClick={() => handleScanDirectoryForServices(currentPath || '')}
+              disabled={!currentPath || scanningServices}
+              startIcon={<span className="material-symbols-outlined">{scanningServices ? 'hourglass_empty' : 'travel_explore'}</span>}
+              sx={{ borderColor: 'var(--tertiary)', color: 'var(--tertiary)', '&:hover': { borderColor: 'var(--primary)', color: 'var(--primary)' } }}
+            >
+              {scanningServices ? 'Scanning...' : 'Scan for Nested Microservices'}
+            </Button>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Button onClick={() => setOpenBrowse(false)} sx={{ color: 'var(--outline)' }}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={() => handleSelectPath(currentPath)}
+              disabled={!currentPath}
+              sx={{ background: 'var(--primary)', color: 'var(--on-primary)', fontWeight: 'bold' }}
+            >
+              Select Current Folder
+            </Button>
+          </div>
+        </DialogActions>
+      </Dialog>
+
+      {/* Discovered Services Batch Import Dialog */}
+      <Dialog
+        open={openDiscoveryModal}
+        onClose={() => setOpenDiscoveryModal(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{ sx: { background: 'var(--surface-container-lowest)', color: 'var(--on-surface)', borderRadius: 2, border: '1px solid var(--outline-variant)' } }}
+      >
+        <DialogTitle sx={{ borderBottom: '1px solid var(--outline-variant)', p: 3 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span className="material-symbols-outlined" style={{ fontSize: '24px', color: 'var(--primary)' }}>auto_awesome</span>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: '18px' }}>
+                  Discovered Microservices ({discoveredServices.length})
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--outline)', marginTop: '2px' }}>
+                  Found {discoveredServices.length} project{discoveredServices.length > 1 ? 's' : ''} with build configuration (pom.xml / build.gradle)
+                </div>
+              </div>
+            </div>
+            <button className="btn-icon" onClick={() => setOpenDiscoveryModal(false)}>
+              <span className="material-symbols-outlined">close</span>
+            </button>
+          </div>
+        </DialogTitle>
+
+        <DialogContent sx={{ p: 3 }}>
+          {/* Target Project Selection & Select All */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--on-surface-variant)' }}>
+                Import into Project:
+              </label>
+              <select
+                className="form-select"
+                style={{ width: 'auto', minWidth: '160px', padding: '6px 12px' }}
+                value={targetProjectForDiscovery}
+                onChange={(e) => setTargetProjectForDiscovery(e.target.value)}
+              >
+                {projects.map(p => (
+                  <option key={p.name} value={p.name}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: '12px', padding: '4px 10px' }}
+                onClick={() => {
+                  const all: Record<string, boolean> = {};
+                  discoveredServices.forEach(s => { all[s.path] = true; });
+                  setSelectedDiscovered(all);
+                }}
+              >
+                Select All
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: '12px', padding: '4px 10px' }}
+                onClick={() => setSelectedDiscovered({})}
+              >
+                Deselect All
+              </button>
+            </div>
+          </div>
+
+          {/* List of Discovered Services */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '420px', overflowY: 'auto' }}>
+            {discoveredServices.map((svc) => {
+              const isSelected = !!selectedDiscovered[svc.path];
+              return (
+                <div
+                  key={svc.path}
+                  style={{
+                    background: isSelected ? 'var(--surface-container)' : 'var(--surface-container-low)',
+                    border: `1px solid ${isSelected ? 'var(--primary)' : 'var(--outline-variant)'}`,
+                    borderRadius: '6px',
+                    padding: '12px 16px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={(e) => setSelectedDiscovered({ ...selectedDiscovered, [svc.path]: e.target.checked })}
+                      style={{ width: '16px', height: '16px', cursor: 'pointer', accentColor: 'var(--primary)' }}
+                    />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--on-surface)' }}>
+                          {svc.name}
+                        </span>
+                        {svc.framework && (
+                          <span
+                            className="framework-badge"
+                            style={{
+                              fontSize: '11px',
+                              padding: '2px 8px',
+                              background: svc.framework.includes('spring') ? 'rgba(109,191,130,0.15)' : 'rgba(160,196,224,0.15)',
+                              color: svc.framework.includes('spring') ? '#6dbf82' : '#a0c4e0',
+                              border: '1px solid currentColor'
+                            }}
+                          >
+                            {svc.framework.includes('spring') ? '🍃 Spring Boot' : svc.framework.includes('gradle') ? '🐘 Gradle' : svc.framework}
+                          </span>
+                        )}
+                        {svc.jdkName && (
+                          <span style={{ fontSize: '11px', color: '#4ade80', background: 'rgba(74, 222, 128, 0.1)', padding: '2px 6px', borderRadius: '3px' }}>
+                            ☕ {svc.jdkName}
+                          </span>
+                        )}
+                        <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)' }}>
+                          Port: {svc.port}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--outline)', marginTop: '4px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={svc.path}>
+                        📁 {svc.relativePath || svc.path}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--on-surface-variant)', background: 'var(--surface-container-high)', padding: '4px 8px', borderRadius: '4px', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={svc.startCommand}>
+                    {svc.startCommand}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </DialogContent>
+
+        <DialogActions sx={{ p: 3, borderTop: '1px solid var(--outline-variant)', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: '12px', color: 'var(--outline)', marginLeft: '8px' }}>
+            {Object.values(selectedDiscovered).filter(Boolean).length} of {discoveredServices.length} selected
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Button onClick={() => setOpenDiscoveryModal(false)} sx={{ color: 'var(--outline)' }}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              onClick={handleImportDiscoveredServices}
+              disabled={Object.values(selectedDiscovered).filter(Boolean).length === 0}
+              sx={{ background: 'var(--primary)', color: 'var(--on-primary)', fontWeight: 'bold' }}
+            >
+              Import {Object.values(selectedDiscovered).filter(Boolean).length} Microservice{Object.values(selectedDiscovered).filter(Boolean).length > 1 ? 's' : ''}
+            </Button>
+          </div>
         </DialogActions>
       </Dialog>
 
