@@ -1408,6 +1408,7 @@ public class FileBrowserController {
                     .framework(framework)
                     .jdkName(jdkSugg != null ? jdkSugg.getSuggestedJdkName() : null)
                     .detectedJavaVersion(jdkSugg != null ? jdkSugg.getDetectedJavaVersion() : null)
+                    .branch(ProcessManagerService.detectGitBranch(dirPath))
                     .build();
 
             discovered.add(svc);
@@ -1432,4 +1433,13 @@ public class FileBrowserController {
         if (detectVenvDir(dir) != null || isPythonProject(dir)) return true;
         return false;
     }
+
+    @GetMapping("/detect-branch")
+    public Map<String, String> detectBranch(@RequestParam String path) {
+        String branch = ProcessManagerService.detectGitBranch(path);
+        Map<String, String> result = new HashMap<>();
+        result.put("branch", branch != null ? branch : "");
+        return result;
+    }
 }
+

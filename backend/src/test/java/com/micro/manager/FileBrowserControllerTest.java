@@ -398,4 +398,29 @@ public class FileBrowserControllerTest {
             assertEquals(8089, controller.suggestPort(balanceDir.getAbsolutePath()));
         }
     }
+
+    @Test
+    public void testDetectGitBranchFromMockDirectory() throws IOException {
+        Path repoDir = tempDir.resolve("my-repo");
+        Files.createDirectories(repoDir);
+        Path gitDir = repoDir.resolve(".git");
+        Files.createDirectories(gitDir);
+        Path headFile = gitDir.resolve("HEAD");
+        Files.write(headFile, "ref: refs/heads/feature/awesome-service\n".getBytes());
+
+        String branch = ProcessManagerService.detectGitBranch(repoDir.toString());
+        assertEquals("feature/awesome-service", branch);
+
+        // Subdirectory check
+        Path subDir = repoDir.resolve("sub-service");
+        Files.createDirectories(subDir);
+        String subBranch = ProcessManagerService.detectGitBranch(subDir.toString());
+        assertEquals("feature/awesome-service", subBranch);
+
+        // Controller endpoint check
+        java.util.Map<String, String> response = controller.detectBranch(subDir.toString());
+        assertNotNull(response);
+        assertEquals("feature/awesome-service", response.get("branch"));
+    }
 }
+

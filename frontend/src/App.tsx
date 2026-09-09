@@ -15,6 +15,7 @@ interface Service {
   rebuildCommand?: string;
   activePropertiesFile?: string;
   jdkName?: string;
+  branch?: string;
 }
 
 interface JdkConfig {
@@ -43,7 +44,9 @@ interface DiscoveredService {
   framework: string;
   jdkName?: string;
   detectedJavaVersion?: string;
+  branch?: string;
 }
+
 
 interface Project {
   name: string;
@@ -59,6 +62,25 @@ const getLogColor = (log: string) => {
   if (upperLog.includes('INFO') || upperLog.includes('SUCCESS') || upperLog.includes('OK')) return 'var(--on-surface)';
   if (upperLog.includes('DEBUG')) return 'var(--outline)';
   return 'rgba(255,255,255,0.7)';
+};
+
+// Distinct colors for service tags in unified logs
+const SERVICE_COLORS = [
+  { bg: 'rgba(88, 101, 242, 0.18)', text: '#bec2ff', border: 'rgba(88, 101, 242, 0.45)' },
+  { bg: 'rgba(56, 189, 248, 0.18)', text: '#7dd3fc', border: 'rgba(56, 189, 248, 0.45)' },
+  { bg: 'rgba(52, 211, 153, 0.18)', text: '#6ee7b7', border: 'rgba(52, 211, 153, 0.45)' },
+  { bg: 'rgba(251, 146, 60, 0.18)', text: '#fdba74', border: 'rgba(251, 146, 60, 0.45)' },
+  { bg: 'rgba(168, 85, 247, 0.18)', text: '#d8b4fe', border: 'rgba(168, 85, 247, 0.45)' },
+  { bg: 'rgba(244, 114, 182, 0.18)', text: '#f472b6', border: 'rgba(244, 114, 182, 0.45)' },
+  { bg: 'rgba(234, 179, 8, 0.18)', text: '#fde047', border: 'rgba(234, 179, 8, 0.45)' },
+  { bg: 'rgba(45, 212, 191, 0.18)', text: '#5eead4', border: 'rgba(45, 212, 191, 0.45)' },
+];
+
+const getServiceBadgeStyle = (name: string) => {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  const idx = Math.abs(hash) % SERVICE_COLORS.length;
+  return SERVICE_COLORS[idx];
 };
 
 // SVG Sparkline Path Generator
@@ -215,10 +237,18 @@ const SvcCard = memo(({
 
       {/* Footer */}
       <div className="svc-card-footer">
-        <span className="framework-tag">
-          {service.port}
-        </span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--outline)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden' }}>
+          <span className="framework-tag">
+            {service.port}
+          </span>
+          {service.branch && (
+            <span className="branch-tag" title={`Current Branch: ${service.branch}`}>
+              <span className="material-symbols-outlined">fork_right</span>
+              {service.branch}
+            </span>
+          )}
+        </div>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--outline)', flexShrink: 0 }}>
           {isRunning ? 'UPTIME: ACTIVE' : 'STOPPED'}
         </span>
       </div>
@@ -426,11 +456,16 @@ function App() {
     }
   }, [logs, autoScroll, activeTab]);
 
-  // SSE stream connection for detailed Logs tab
+  // SSE stream connection for Logs tab (Unified if none selected, or specific service)
   useEffect(() => {
-    if (!selectedLogService) return;
+    if (activeTab !== 'logs') {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      return;
+    }
 
-    const { projectName, serviceName } = selectedLogService;
     let active = true;
     let es: EventSource;
     let retryTimer: number;
@@ -439,7 +474,10 @@ function App() {
 
     const connect = () => {
       if (!active) return;
-      es = new EventSource(`/api/projects/${projectName}/services/${serviceName}/logs`);
+      const url = selectedLogService
+        ? `/api/projects/${selectedLogService.projectName}/services/${selectedLogService.serviceName}/logs`
+        : `/api/projects/logs`;
+      es = new EventSource(url);
       eventSourceRef.current = es;
       es.onmessage = (event) => {
         if (active) setLogs(prev => [...prev.slice(-999), event.data]);
@@ -458,14 +496,8 @@ function App() {
       if (es) es.close();
       eventSourceRef.current = null;
     };
-  }, [selectedLogService?.projectName, selectedLogService?.serviceName]);
+  }, [activeTab, selectedLogService?.projectName, selectedLogService?.serviceName]);
 
-  // Auto-select the first service on Logs tab if none is selected
-  useEffect(() => {
-    if (activeTab === 'logs' && !selectedLogService && allServices.length > 0) {
-      setSelectedLogService({ projectName: allServices[0].projectName, serviceName: allServices[0].name });
-    }
-  }, [activeTab, selectedLogService, projects]);
 
   const handleAction = async (projectName: string, serviceName: string, action: string) => {
     try {
@@ -645,7 +677,8 @@ function App() {
           port: s.port,
           startCommand: s.startCommand,
           rebuildCommand: s.rebuildCommand,
-          jdkName: s.jdkName || prev.jdkName
+          jdkName: s.jdkName || prev.jdkName,
+          branch: s.branch || prev.branch
         }));
         setDetectedFramework(s.framework || '');
         setOpenBrowse(false);
@@ -684,7 +717,8 @@ function App() {
         startCommand: s.startCommand,
         rebuildCommand: s.rebuildCommand,
         status: 'STOPPED',
-        jdkName: s.jdkName || ''
+        jdkName: s.jdkName || '',
+        branch: s.branch || ''
       }));
 
       await axios.post(`/api/projects/${targetProjectForDiscovery}/services/batch`, payload);
@@ -698,7 +732,7 @@ function App() {
 
   const fetchSuggestions = async (path: string) => {
     try {
-      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }, { data: propsData }, { data: jdkSuggestion }, { data: nameData }] = await Promise.all([
+      const [{ data }, { data: rebuildData }, { data: portData }, { data: framework }, { data: propsData }, { data: jdkSuggestion }, { data: nameData }, branchRes] = await Promise.all([
         axios.get(`/api/fs/suggest-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-rebuild-commands?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-port?path=${encodeURIComponent(path)}`),
@@ -706,6 +740,7 @@ function App() {
         axios.get(`/api/fs/list-properties?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-jdk?path=${encodeURIComponent(path)}`),
         axios.get(`/api/fs/suggest-name?path=${encodeURIComponent(path)}`),
+        axios.get<{ branch: string }>(`/api/fs/detect-branch?path=${encodeURIComponent(path)}`).catch(() => ({ data: { branch: '' } })),
       ]);
 
       setSuggestedCommands(data || []);
@@ -720,7 +755,8 @@ function App() {
         startCommand: prev.startCommand || (data?.[0] || ''),
         rebuildCommand: prev.rebuildCommand || (rebuildData?.[0] || ''),
         port: portData ? portData : prev.port,
-        jdkName: jdkSuggestion?.suggestedJdkName ? jdkSuggestion.suggestedJdkName : prev.jdkName
+        jdkName: jdkSuggestion?.suggestedJdkName ? jdkSuggestion.suggestedJdkName : prev.jdkName,
+        branch: branchRes?.data?.branch || prev.branch || ''
       }));
     } catch (err) {
       console.error('Failed to fetch suggestions', err);
@@ -787,11 +823,13 @@ function App() {
   };
 
   const downloadLogs = () => {
-    if (!selectedLogService) return;
+    const filename = selectedLogService
+      ? `${selectedLogService.serviceName}_logs.txt`
+      : `unified_microservices_logs.txt`;
     const element = document.createElement("a");
     const file = new Blob([logs.join('\n')], { type: 'text/plain' });
     element.href = URL.createObjectURL(file);
-    element.download = `${selectedLogService.serviceName}_logs.txt`;
+    element.download = filename;
     document.body.appendChild(element);
     element.click();
     document.body.removeChild(element);
@@ -836,6 +874,7 @@ function App() {
               <th>Service Name</th>
               {selectedProject === 'All' && <th>Project</th>}
               <th>Port</th>
+              <th>Branch</th>
               <th>Status</th>
               <th className="right" style={{ paddingRight: '24px' }}>Actions</th>
             </tr>
@@ -869,6 +908,16 @@ function App() {
                   )}
                   <td>
                     <span className="svc-port">{s.port}</span>
+                  </td>
+                  <td>
+                    {s.branch ? (
+                      <span className="branch-tag" title={`Branch: ${s.branch}`}>
+                        <span className="material-symbols-outlined">fork_right</span>
+                        {s.branch}
+                      </span>
+                    ) : (
+                      <span style={{ color: 'var(--outline)', fontStyle: 'italic', fontSize: '11px' }}>—</span>
+                    )}
                   </td>
                   <td>
                     <span className={`status-badge ${s.status.toLowerCase()}`}>
@@ -1181,7 +1230,7 @@ function App() {
   const renderLogsPage = () => {
     const activeService = selectedLogService
       ? allServices.find(s => s.name === selectedLogService.serviceName && s.projectName === selectedLogService.projectName)
-      : allServices[0];
+      : null;
 
     const activeKey = activeService ? `${activeService.projectName}:${activeService.name}` : '';
     const currentTelemetry = activeService && telemetry[activeKey] ? telemetry[activeKey] : {
@@ -1197,20 +1246,25 @@ function App() {
     return (
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* Left Telemetry/Config Pane */}
-        <section style={{ width: '400px', background: 'var(--surface-container-lowest)', borderRight: '1px solid var(--outline-variant)', display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: '20px' }}>
-          <div style={{ marginBottom: '24px' }}>
-            <span className="caps" style={{ color: 'var(--outline)', display: 'block', marginBottom: '8px' }}>Select Instance</span>
+        <section style={{ width: '380px', background: 'var(--surface-container-lowest)', borderRight: '1px solid var(--outline-variant)', display: 'flex', flexDirection: 'column', overflowY: 'auto', padding: '20px' }}>
+          <div style={{ marginBottom: '20px' }}>
+            <span className="caps" style={{ color: 'var(--outline)', display: 'block', marginBottom: '8px' }}>Log Target Instance</span>
             <select
               className="form-select"
               value={activeKey}
               onChange={(e) => {
-                const [proj, name] = e.target.value.split(':');
-                setSelectedLogService({ projectName: proj, serviceName: name });
+                if (!e.target.value) {
+                  setSelectedLogService(null);
+                } else {
+                  const [proj, name] = e.target.value.split(':');
+                  setSelectedLogService({ projectName: proj, serviceName: name });
+                }
               }}
             >
+              <option value="">✦ All Services (Unified Logs)</option>
               {allServices.map(s => (
                 <option key={`${s.projectName}:${s.name}`} value={`${s.projectName}:${s.name}`}>
-                  {s.projectName} / {s.name}
+                  {s.projectName} / {s.name}{s.branch ? ` (${s.branch})` : ''}
                 </option>
               ))}
             </select>
@@ -1287,6 +1341,22 @@ function App() {
                     </div>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <label className="caps" style={{ color: 'var(--outline)', fontSize: '9px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span className="material-symbols-outlined" style={{ fontSize: '10px' }}>fork_right</span>
+                      Git Branch
+                    </label>
+                    <div style={{ background: 'var(--surface-container)', padding: '6px 10px', border: '1px solid var(--outline-variant)', wordBreak: 'break-all', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {activeService.branch ? (
+                        <span className="branch-tag" style={{ border: 'none', background: 'none', padding: 0 }}>
+                          <span className="material-symbols-outlined">fork_right</span>
+                          {activeService.branch}
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--outline)', fontStyle: 'italic' }}>—</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                     <label className="caps" style={{ color: 'var(--outline)', fontSize: '9px' }}>Start Command</label>
                     <div style={{ background: 'var(--surface-container)', padding: '6px 10px', border: '1px solid var(--outline-variant)', wordBreak: 'break-all', color: 'var(--on-surface)' }}>
                       {activeService.startCommand || <span style={{ color: 'var(--outline)', fontStyle: 'italic' }}>—</span>}
@@ -1335,7 +1405,6 @@ function App() {
                 </div>
               </div>
 
-
               {/* Editable Env variables */}
               <div style={{ marginBottom: '16px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
@@ -1365,8 +1434,69 @@ function App() {
               </div>
             </>
           ) : (
-            <div style={{ color: 'var(--outline)', fontStyle: 'italic', textAlign: 'center', marginTop: '40px' }}>
-              No service registered. Create a service to view telemetry.
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              <div style={{ background: 'var(--surface)', border: '1px solid var(--outline-variant)', borderRadius: '6px', padding: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <span className="material-symbols-outlined" style={{ color: 'var(--primary)', fontSize: '20px' }}>layers</span>
+                  <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--on-surface)' }}>Unified Logs Stream</span>
+                </div>
+                <p style={{ fontSize: '12px', color: 'var(--outline)', lineHeight: 1.5, margin: 0 }}>
+                  Streaming combined output from all active microservices simultaneously. Click any service below to isolate its logs.
+                </p>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '12px', flexWrap: 'wrap' }}>
+                  <span className="status-badge running" style={{ fontSize: '11px', padding: '3px 8px' }}>
+                    <span className="dot" />
+                    {allServices.filter(s => s.status === 'RUNNING').length} Active
+                  </span>
+                  <span className="status-badge stopped" style={{ fontSize: '11px', padding: '3px 8px' }}>
+                    <span className="dot" />
+                    {allServices.filter(s => s.status === 'STOPPED').length} Stopped
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <span className="caps" style={{ color: 'var(--on-surface-variant)', display: 'block', marginBottom: '10px' }}>
+                  Select Service to Isolate ({allServices.length})
+                </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {allServices.map(s => {
+                    const isSvcRunning = s.status === 'RUNNING';
+                    const badgeStyle = getServiceBadgeStyle(s.name);
+                    return (
+                      <div
+                        key={`${s.projectName}:${s.name}`}
+                        className="unified-svc-item"
+                        onClick={() => setSelectedLogService({ projectName: s.projectName, serviceName: s.name })}
+                        title={`Focus logs for ${s.name}`}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                          <span className={`dot ${isSvcRunning ? 'running' : 'stopped'}`} style={{ width: '6px', height: '6px', flexShrink: 0 }} />
+                          <span
+                            className="log-svc-tag"
+                            style={{
+                              backgroundColor: badgeStyle.bg,
+                              color: badgeStyle.text,
+                              borderColor: badgeStyle.border,
+                            }}
+                          >
+                            {s.name}
+                          </span>
+                          {s.branch && (
+                            <span className="branch-tag" style={{ fontSize: '10px', padding: '1px 5px' }}>
+                              <span className="material-symbols-outlined" style={{ fontSize: '11px' }}>fork_right</span>
+                              {s.branch}
+                            </span>
+                          )}
+                        </div>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--outline)', flexShrink: 0 }}>
+                          :{s.port}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -1378,48 +1508,103 @@ function App() {
             <div className="topbar-left" style={{ gap: '6px' }}>
               <span className="caps" style={{ color: 'var(--outline)' }}>Projects</span>
               <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--outline)' }}>chevron_right</span>
-              <span className="caps" style={{ color: 'var(--outline)' }}>{activeService?.projectName || 'NO_PROJECT'}</span>
-              <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--outline)' }}>chevron_right</span>
-              <span style={{ color: 'var(--primary)', fontWeight: 'bold', fontFamily: 'var(--font-mono)' }}>{(activeService?.name || 'NO_SERVICE').toUpperCase()}</span>
+              {activeService ? (
+                <>
+                  <span className="caps" style={{ color: 'var(--outline)' }}>{activeService.projectName}</span>
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--outline)' }}>chevron_right</span>
+                  <span style={{ color: 'var(--primary)', fontWeight: 'bold', fontFamily: 'var(--font-mono)' }}>{activeService.name.toUpperCase()}</span>
 
-              {activeService && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
-                  <span className={`dot ${isRunning ? 'running' : (isRebuilding ? 'rebuilding' : 'stopped')}`} style={{ width: '6px', height: '6px', borderRadius: '50%' }} />
-                  <span className={`caps ${isRunning ? 'status-label running' : (isRebuilding ? 'status-label rebuilding' : 'status-label stopped')}`} style={{ fontSize: '10px' }}>
-                    {activeService.status}
-                  </span>
-                </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
+                    <span className={`dot ${isRunning ? 'running' : (isRebuilding ? 'rebuilding' : 'stopped')}`} style={{ width: '6px', height: '6px', borderRadius: '50%' }} />
+                    <span className={`caps ${isRunning ? 'status-label running' : (isRebuilding ? 'status-label rebuilding' : 'status-label stopped')}`} style={{ fontSize: '10px' }}>
+                      {activeService.status}
+                    </span>
+                  </div>
+
+                  {activeService.branch && (
+                    <span className="branch-tag" style={{ marginLeft: '10px' }} title={`Current Git Branch: ${activeService.branch}`}>
+                      <span className="material-symbols-outlined">fork_right</span>
+                      {activeService.branch}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="caps" style={{ color: 'var(--outline)' }}>All Services</span>
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px', color: 'var(--outline)' }}>chevron_right</span>
+                  <span style={{ color: 'var(--primary)', fontWeight: 'bold', fontFamily: 'var(--font-mono)' }}>UNIFIED LOGS STREAM</span>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
+                    <span className="status-badge running" style={{ fontSize: '11px', padding: '2px 8px' }}>
+                      <span className="dot" />
+                      {allServices.filter(s => s.status === 'RUNNING').length} of {allServices.length} RUNNING
+                    </span>
+                  </div>
+                </>
               )}
             </div>
 
-            {activeService && (
-              <div className="topbar-right">
-                <button
-                  className="btn btn-ghost"
-                  onClick={() => handleAction(activeService.projectName, activeService.name, 'restart')}
-                >
-                  <span className="material-symbols-outlined">restart_alt</span>
-                  Restart
-                </button>
-                <div className="topbar-divider" />
-                <button
-                  className="btn btn-primary"
-                  disabled={isRunning || isRebuilding}
-                  onClick={() => handleAction(activeService.projectName, activeService.name, 'start')}
-                >
-                  <span className="material-symbols-outlined">play_arrow</span>
-                  Start
-                </button>
-                <button
-                  className="btn btn-danger"
-                  disabled={activeService.status === 'STOPPED'}
-                  onClick={() => handleAction(activeService.projectName, activeService.name, 'stop')}
-                >
-                  <span className="material-symbols-outlined">stop</span>
-                  Stop
-                </button>
-              </div>
-            )}
+            <div className="topbar-right">
+              {activeService ? (
+                <>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => setSelectedLogService(null)}
+                    style={{ color: 'var(--primary)', borderColor: 'rgba(190,194,255,0.3)' }}
+                    title="Switch to all unified logs"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>view_stream</span>
+                    All Services Logs
+                  </button>
+                  <div className="topbar-divider" />
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => handleAction(activeService.projectName, activeService.name, 'restart')}
+                  >
+                    <span className="material-symbols-outlined">restart_alt</span>
+                    Restart
+                  </button>
+                  <div className="topbar-divider" />
+                  <button
+                    className="btn btn-primary"
+                    disabled={isRunning || isRebuilding}
+                    onClick={() => handleAction(activeService.projectName, activeService.name, 'start')}
+                  >
+                    <span className="material-symbols-outlined">play_arrow</span>
+                    Start
+                  </button>
+                  <button
+                    className="btn btn-danger"
+                    disabled={activeService.status === 'STOPPED'}
+                    onClick={() => handleAction(activeService.projectName, activeService.name, 'stop')}
+                  >
+                    <span className="material-symbols-outlined">stop</span>
+                    Stop
+                  </button>
+                </>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={startAll}
+                    style={{ color: '#4ade80' }}
+                    title="Start all stopped services"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>play_arrow</span>
+                    Start All
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    onClick={stopAll}
+                    style={{ color: 'var(--error)' }}
+                    title="Stop all running services"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>stop</span>
+                    Stop All
+                  </button>
+                </div>
+              )}
+            </div>
           </header>
 
           {/* Control Bar for Logs */}
@@ -1430,7 +1615,7 @@ function App() {
                 <input
                   type="text"
                   className="search-input"
-                  placeholder="Search logs..."
+                  placeholder={activeService ? `Search ${activeService.name} logs...` : "Search all unified logs..."}
                   value={logSearch}
                   onChange={(e) => setLogSearch(e.target.value)}
                   style={{ height: '28px', fontSize: '11px' }}
@@ -1479,7 +1664,7 @@ function App() {
                   />
                 </button>
               </div>
-              <button className="btn-icon" onClick={downloadLogs} title="Download Logs">
+              <button className="btn-icon" onClick={downloadLogs} title={activeService ? `Download ${activeService.name} Logs` : "Download Unified Logs"}>
                 <span className="material-symbols-outlined">download</span>
               </button>
               <button className="btn-icon danger" onClick={() => setLogs([])} title="Clear View">
@@ -1492,11 +1677,18 @@ function App() {
           <div className="log-body" style={{ flex: 1, padding: '12px 0', overflowY: 'auto' }}>
             {filteredLogs.length === 0 ? (
               <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: 'var(--outline)', fontStyle: 'italic', fontSize: '12px' }}>
-                {activeService ? 'No logs match filters.' : 'Select an instance to stream logs.'}
+                {activeService
+                  ? 'No logs match filters.'
+                  : (allServices.some(s => s.status === 'RUNNING')
+                    ? 'Waiting for unified logs from running services...'
+                    : 'No services are currently running. Start a service to see unified logs.')}
               </div>
             ) : (
               filteredLogs.map((log, i) => {
-                const upperLog = log.toUpperCase();
+                const matchUnified = log.match(/^\[([^\]]+)\]\s*(.*)$/);
+                const svcTag = matchUnified ? matchUnified[1] : null;
+                const displayLog = matchUnified ? matchUnified[2] : log;
+                const upperLog = displayLog.toUpperCase();
                 const level = upperLog.includes('ERROR') || upperLog.includes('EXCEPTION') || upperLog.includes('FAIL')
                   ? 'ERROR'
                   : upperLog.includes('WARN')
@@ -1506,15 +1698,35 @@ function App() {
                       : 'INFO';
 
                 const isError = level === 'ERROR';
+                const badgeStyle = svcTag ? getServiceBadgeStyle(svcTag) : null;
 
                 return (
                   <div key={i} className={`log-entry ${isError ? 'error-row' : ''}`}>
                     <span className="log-ts">{new Date().toLocaleTimeString()}</span>
+                    {svcTag && (
+                      <span
+                        className="log-svc-tag"
+                        style={{
+                          backgroundColor: badgeStyle?.bg,
+                          color: badgeStyle?.text,
+                          borderColor: badgeStyle?.border,
+                        }}
+                        title={`Click to focus on ${svcTag} logs`}
+                        onClick={() => {
+                          const targetSvc = allServices.find(s => s.name === svcTag);
+                          if (targetSvc) {
+                            setSelectedLogService({ projectName: targetSvc.projectName, serviceName: targetSvc.name });
+                          }
+                        }}
+                      >
+                        {svcTag}
+                      </span>
+                    )}
                     <span className={`log-level-tag ${level.toLowerCase()}`}>
                       {level}
                     </span>
-                    <span className="log-msg" style={{ color: getLogColor(log) }}>
-                      {log}
+                    <span className="log-msg" style={{ color: getLogColor(displayLog) }}>
+                      {displayLog}
                     </span>
                   </div>
                 );
@@ -1532,8 +1744,7 @@ function App() {
                 const form = e.currentTarget;
                 const input = form.querySelector('input');
                 if (input && input.value.trim()) {
-                  const cmd = input.value.trim();
-                  setLogs(prev => [...prev, `[USER COMMAND]: ${cmd}`, `Command execution is simulated.`]);
+                  setLogs(prev => [...prev, `[CMD] $ ${input.value}`]);
                   input.value = '';
                 }
               }}
@@ -1541,10 +1752,11 @@ function App() {
             >
               <input
                 type="text"
-                placeholder="Type a command (e.g. --tail 100)"
-                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--on-surface)', fontFamily: 'var(--font-mono)', fontSize: '12px' }}
+                placeholder={activeService ? `Send command / test echo for ${activeService.name}...` : "Filter or inspect unified logs stream..."}
+                style={{ background: 'transparent', border: 'none', color: 'var(--on-surface)', fontFamily: 'var(--font-mono)', fontSize: '12px', width: '100%', outline: 'none' }}
               />
             </form>
+            <span className="log-cmd-hint">{activeService ? `${activeService.name} on :${activeService.port}` : 'All Microservices'}</span>
           </footer>
         </section>
       </div>
@@ -1856,6 +2068,42 @@ function App() {
                   <span className="material-symbols-outlined">folder_open</span>
                 </button>
               </div>
+            </div>
+
+            <div className="form-field">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label className="form-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px', color: 'var(--primary)' }}>fork_right</span>
+                  Current Git Branch
+                </label>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ padding: '2px 8px', fontSize: '11px', height: '24px' }}
+                  onClick={async () => {
+                    if (formData.path) {
+                      try {
+                        const { data } = await axios.get<{ branch: string }>(`/api/fs/detect-branch?path=${encodeURIComponent(formData.path)}`);
+                        if (data?.branch) {
+                          setFormData(prev => ({ ...prev, branch: data.branch }));
+                        }
+                      } catch (err) {
+                        console.error('Failed to detect branch', err);
+                      }
+                    }
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>sync</span>
+                  Detect Branch
+                </button>
+              </div>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. main, master, feature/auth"
+                value={formData.branch || ''}
+                onChange={(e) => setFormData({ ...formData, branch: e.target.value })}
+              />
             </div>
 
             {detectedFramework && detectedFramework !== 'unknown' && (() => {
@@ -2379,6 +2627,12 @@ function App() {
                         <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--primary)' }}>
                           Port: {svc.port}
                         </span>
+                        {svc.branch && (
+                          <span className="branch-tag" style={{ fontSize: '10px', padding: '1px 6px' }} title={`Git Branch: ${svc.branch}`}>
+                            <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>fork_right</span>
+                            {svc.branch}
+                          </span>
+                        )}
                       </div>
                       <div style={{ fontSize: '11px', color: 'var(--outline)', marginTop: '4px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={svc.path}>
                         📁 {svc.relativePath || svc.path}

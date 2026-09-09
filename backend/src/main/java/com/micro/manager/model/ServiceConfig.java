@@ -15,4 +15,7 @@ public class ServiceConfig {
     private String activePropertiesFile;
     /** Optional: name of the configured JDK to use. Null/empty = use default. */
     private String jdkName;
+    /** Current git branch if applicable */
+    private String branch;
 }
+
