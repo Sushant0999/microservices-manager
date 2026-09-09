@@ -36,4 +36,8 @@ public class DiscoveredService {
 
     /** Detected Java version (e.g. 17, 11, 8) */
     private String detectedJavaVersion;
+
+    /** Current git branch if applicable */
+    private String branch;
 }
+

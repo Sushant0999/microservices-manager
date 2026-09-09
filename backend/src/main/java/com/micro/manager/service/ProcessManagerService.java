@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 @Service
@@ -22,6 +23,8 @@ public class ProcessManagerService {
     private final Map<String, Process> activeProcesses = new ConcurrentHashMap<>();
     private final Map<String, List<String>> logs = new ConcurrentHashMap<>();
     private final Map<String, List<Consumer<String>>> logConsumers = new ConcurrentHashMap<>();
+    private final List<String> unifiedLogs = Collections.synchronizedList(new ArrayList<>());
+    private final List<Consumer<String>> unifiedLogConsumers = new CopyOnWriteArrayList<>();
     private final List<JdkConfig> jdks = new CopyOnWriteArrayList<>();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     
@@ -180,8 +183,21 @@ public class ProcessManagerService {
     }
 
     public Collection<Project> getProjects() {
+        for (Project project : projects.values()) {
+            if (project.getServices() != null) {
+                for (ServiceConfig service : project.getServices()) {
+                    if (service.getPath() != null && !service.getPath().trim().isEmpty()) {
+                        String detected = detectGitBranch(service.getPath());
+                        if (detected != null && !detected.isEmpty()) {
+                            service.setBranch(detected);
+                        }
+                    }
+                }
+            }
+        }
         return projects.values();
     }
+
 
     public void addProject(Project project) throws IOException {
         if (projects.containsKey(project.getName())) {
@@ -245,6 +261,12 @@ public class ProcessManagerService {
         if (exists) {
             throw new IllegalArgumentException("Service already exists in project " + projectName + ": " + config.getName());
         }
+        if (config.getBranch() == null || config.getBranch().trim().isEmpty()) {
+            String detected = detectGitBranch(config.getPath());
+            if (detected != null) {
+                config.setBranch(detected);
+            }
+        }
         config.setStatus("STOPPED");
         config.setProjectName(projectName);
         project.getServices().add(config);
@@ -259,6 +281,13 @@ public class ProcessManagerService {
         
         if (!oldServiceName.equals(config.getName())) {
             stopService(projectName, oldServiceName);
+        }
+
+        if (config.getBranch() == null || config.getBranch().trim().isEmpty()) {
+            String detected = detectGitBranch(config.getPath());
+            if (detected != null) {
+                config.setBranch(detected);
+            }
         }
 
         List<ServiceConfig> services = project.getServices();
@@ -359,6 +388,22 @@ public class ProcessManagerService {
                             } catch (Exception e) {
                                 // ignore
                             }
+                        }
+                    }
+                }
+
+                // Append to unified logs
+                String unifiedLine = "[" + name + "] " + finalLine;
+                synchronized (unifiedLogs) {
+                    unifiedLogs.add(unifiedLine);
+                    if (unifiedLogs.size() > 2000) {
+                        unifiedLogs.remove(0);
+                    }
+                    for (Consumer<String> consumer : unifiedLogConsumers) {
+                        try {
+                            consumer.accept(unifiedLine);
+                        } catch (Exception e) {
+                            // ignore
                         }
                     }
                 }
@@ -590,6 +635,98 @@ public class ProcessManagerService {
             consumers.remove(consumer);
         }
     }
+
+    public void addUnifiedLogConsumer(Consumer<String> consumer) {
+        executorService.submit(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            synchronized (unifiedLogs) {
+                for (String log : unifiedLogs) {
+                    try {
+                        consumer.accept(log);
+                    } catch (Exception e) {
+                        return; // broken emitter
+                    }
+                }
+                unifiedLogConsumers.add(consumer);
+            }
+        });
+    }
+
+    public void removeUnifiedLogConsumer(Consumer<String> consumer) {
+        unifiedLogConsumers.remove(consumer);
+    }
+
+    public static String detectGitBranch(String path) {
+        if (path == null || path.trim().isEmpty()) {
+            return null;
+        }
+        File dir = new File(path);
+        if (!dir.exists()) {
+            return null;
+        }
+        try {
+            File current = dir.isDirectory() ? dir : dir.getParentFile();
+            while (current != null && current.exists()) {
+                File gitFileOrDir = new File(current, ".git");
+                if (gitFileOrDir.exists()) {
+                    if (gitFileOrDir.isDirectory()) {
+                        File headFile = new File(gitFileOrDir, "HEAD");
+                        if (headFile.exists() && headFile.isFile()) {
+                            String content = new String(java.nio.file.Files.readAllBytes(headFile.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+                            if (content.startsWith("ref: refs/heads/")) {
+                                return content.substring("ref: refs/heads/".length()).trim();
+                            } else if (!content.isEmpty()) {
+                                return content.length() > 7 ? content.substring(0, 7) : content;
+                            }
+                        }
+                    } else if (gitFileOrDir.isFile()) {
+                        String content = new String(java.nio.file.Files.readAllBytes(gitFileOrDir.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+                        if (content.startsWith("gitdir:")) {
+                            String gitDirRel = content.substring("gitdir:".length()).trim();
+                            File gitDir = new File(gitDirRel);
+                            if (!gitDir.isAbsolute()) {
+                                gitDir = new File(current, gitDirRel).getCanonicalFile();
+                            }
+                            File headFile = new File(gitDir, "HEAD");
+                            if (headFile.exists() && headFile.isFile()) {
+                                String headContent = new String(java.nio.file.Files.readAllBytes(headFile.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+                                if (headContent.startsWith("ref: refs/heads/")) {
+                                    return headContent.substring("ref: refs/heads/".length()).trim();
+                                } else if (!headContent.isEmpty()) {
+                                    return headContent.length() > 7 ? headContent.substring(0, 7) : headContent;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                current = current.getParentFile();
+            }
+        } catch (Exception ignored) {}
+
+        // Fallback: git CLI
+        try {
+            ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "--abbrev-ref", "HEAD");
+            File execDir = dir.isDirectory() ? dir : dir.getParentFile();
+            if (execDir != null && execDir.exists()) {
+                pb.directory(execDir);
+                Process p = pb.start();
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                    String b = r.readLine();
+                    if (p.waitFor(1500, TimeUnit.MILLISECONDS) && p.exitValue() == 0 && b != null && !b.trim().isEmpty() && !"HEAD".equalsIgnoreCase(b.trim())) {
+                        return b.trim();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
 
     public void rebuildService(String projectName, String name) throws IOException, InterruptedException {
         Project project = projects.get(projectName);

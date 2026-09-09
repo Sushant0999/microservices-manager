@@ -114,4 +114,29 @@ public class ProjectController {
         
         return emitter;
     }
+
+    @GetMapping(value = "/logs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamUnifiedLogs() {
+        SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
+
+        Consumer<String> consumer = new Consumer<String>() {
+            @Override
+            public synchronized void accept(String line) {
+                try {
+                    emitter.send(line);
+                } catch (IOException e) {
+                    processManager.removeUnifiedLogConsumer(this);
+                }
+            }
+        };
+
+        emitter.onCompletion(() -> processManager.removeUnifiedLogConsumer(consumer));
+        emitter.onTimeout(() -> processManager.removeUnifiedLogConsumer(consumer));
+        emitter.onError((e) -> processManager.removeUnifiedLogConsumer(consumer));
+
+        processManager.addUnifiedLogConsumer(consumer);
+
+        return emitter;
+    }
 }
+
